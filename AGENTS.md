@@ -1,0 +1,1 @@
+Le dépôt GitHub matnoublanche/ScanStation est la source de référence. Publier les modifications dans ce dépôt avant leur déploiement. Sur le Raspberry Pi, appliquer les mises à jour avec la commande d’installation du README. Vérifier la version installée et conserver la configuration de l’utilisateur. Les documents numérisés et les données de test personnelles restent sur le Pi.

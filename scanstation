@@ -1,0 +1,529 @@
+#!/usr/bin/python3
+"""Moteur ScanStation pour S1300i, 300 dpi couleur, ADF duplex."""
+import tomllib
+import fcntl
+import ctypes
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+from PIL import ImageOps, Image, ImageChops, ImageFilter
+
+VERSION = "0.2.0"
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
+
+
+def event(args, name, **fields):
+    if args.json:
+        print(json.dumps({"event": name, **fields}, ensure_ascii=False), flush=True)
+    else:
+        print(name, *fields.values(), flush=True)
+
+
+def scanner_device(configured):
+    if configured != "auto":
+        return configured
+    devices = subprocess.check_output(["scanimage", "-f", "%d%n"], text=True).splitlines()
+    matches = [d for d in devices if d.startswith("epjitsu:")]
+    if len(matches) != 1:
+        raise ValueError("Préciser --device : aucun périphérique epjitsu ou plusieurs détectés.")
+    return matches[0]
+
+
+def fold_traces_only(contrast):
+    """Reconnaître une trace fine et continue traversant une page très claire."""
+    for values in (contrast, contrast.T):
+        rows = np.flatnonzero((values > 84).any(axis=1))
+        if not rows.size:
+            continue
+        groups = np.split(rows, np.flatnonzero(np.diff(rows) > 1) + 1)
+        if len(groups) > 4:
+            continue
+        for group in groups:
+            if len(group) > 4:
+                break
+            strip = values[max(0, group[0]-3):group[-1]+4]
+            # Une marque isolée, un QR ou du texte ne couvrent pas de manière
+            # continue la largeur du papier dans une bande aussi mince.
+            if (strip.max(axis=0) > 30).mean() < .85:
+                break
+            if np.quantile((strip > 45).sum(axis=0), .9) > 4:
+                break
+        else:
+            return True
+    return False
+
+
+def inspect_page(im, verso=False):
+    # Le canal le plus sombre protège également les marques de couleur.
+    r, g, b = im.convert("RGB").split()
+    ink = ImageChops.darker(ImageChops.darker(r, g), b)
+    small = ink.resize((max(1, ink.width // 3), max(1, ink.height // 3)),
+                       Image.Resampling.BOX)
+    hist = im.convert("L").resize(small.size, Image.Resampling.BOX).histogram()
+    bright = sum(hist[210:]) / (small.width * small.height)
+    # Un petit motif sombre sur fond clair déclenche un veto local.
+    background = small.filter(ImageFilter.MaxFilter(7))
+    contrast = ImageChops.subtract(background, small)
+    local = contrast.filter(ImageFilter.BoxBlur(1))
+    peak = local.getextrema()[1]
+    margin = 30  # Environ 7,6 mm après réduction à 100 dpi.
+    if min(local.size) <= 2 * margin:
+        return False, round(bright, 5), peak
+    inner = local.crop((margin, margin, local.width - margin, local.height - margin))
+    blank = bright >= 0.94 and peak <= 132 and inner.getextrema()[1] <= 84
+    if not blank and verso and bright >= .94 and peak <= 132:
+        blank = fold_traces_only(np.asarray(inner))
+    return blank, round(bright, 5), peak
+
+
+def verify(directory, args):
+    expected = [False, True, False, False]
+    actual = []
+    for n in range(1, 5):
+        name = directory / f"page-{n:03}.pnm"
+        with Image.open(name) as im:
+            paper, _, _ = paper_area(im)
+            blank, bright, peak = inspect_page(paper, verso=n % 2 == 0)
+        actual.append(blank)
+        event(args, "reference", fichier=name.name, conserve=not blank, clairs=bright, contraste=peak)
+    if actual != expected:
+        raise ValueError("Contrôle refusé. Relancer sans --filtrer pour conserver toutes les faces.")
+
+
+def pages(directory):
+    found = sorted((int(m[1]), p) for p in directory.iterdir()
+                   if (m := re.fullmatch(r"page-(\d+)\.pnm", p.name)))
+    if not found or [n for n, _ in found] != list(range(1, len(found) + 1)):
+        raise ValueError(f"Lot vide ou numérotation discontinue dans {directory}")
+    if len(found) % 2:
+        raise ValueError(f"Nombre impair de faces dans {directory}. Vérifier le duplex.")
+    return [p for _, p in found]
+
+
+def acquire(dest, device):
+    result = subprocess.run(["scanimage", "-d", device, "--source", "ADF Duplex",
+                             "--mode", "Color", "--resolution", "300", "--page-height", "0", "--format=pnm",
+                             "--batch=page-%06d.pnm"], cwd=dest)
+    # SANE_STATUS_NO_DOCS (7) est normal en fin de chargeur.
+    if result.returncode not in (0, 7):
+        raise ValueError(f"Acquisition interrompue (scanimage {result.returncode}).")
+    return pages(dest)
+
+
+def edge_line(gray, reverse=False):
+    """Ajuster le passage fond gris -> papier, à plusieurs hauteurs."""
+    width, height = gray.size
+    ys = np.linspace(height * .04, height * .96, 101).astype(int)
+    depth = min(width // 20, 130)
+    if depth < 12:
+        return None
+    strip = np.asarray(gray)[:, ::-1] if reverse else np.asarray(gray)
+    samples = np.median(strip[ys[:, None] + np.arange(-2, 3), :depth], axis=1)
+    steps = samples[:, 6:] - samples[:, :-6]
+    xs = steps.argmax(axis=1) + 3
+    valid = (steps.max(axis=1) >= 22) & (samples[:, :2].mean(axis=1) < 205)
+    if valid.sum() < 42:
+        return None
+    xs, ys = xs[valid], ys[valid]
+    best = np.zeros(len(xs), dtype=bool)
+    for i in range(0, len(xs), 4):
+        for j in range(i + 1, len(xs), 4):
+            if ys[j] - ys[i] < height * .25:
+                continue
+            slope = (xs[j] - xs[i]) / (ys[j] - ys[i])
+            if abs(slope) > .06:
+                continue
+            agree = abs(xs - xs[i] - slope * (ys - ys[i])) < 4
+            if agree.sum() > best.sum():
+                best = agree
+    if best.sum() < 42 or np.ptp(ys[best]) < height * .52:
+        return None
+    slope, intercept = np.polyfit(ys[best], xs[best], 1)
+    if reverse:
+        return -slope, width - intercept
+    return slope, intercept
+
+
+def straighten(im):
+    gray = im.convert("L")
+    left = edge_line(gray)
+    right = edge_line(gray, True)
+    lines = [line for line in (left, right) if line is not None]
+    if not lines or (len(lines) == 2 and abs(left[0] - right[0]) > .006):
+        return im.copy(), 0.0
+    slope = float(np.mean([line[0] for line in lines]))
+    w, h = im.size
+    # u = x - pente*y ; v = y + pente*x. Garder toute la hauteur.
+    lo = left[1] + 2 if left else min(0, -slope*h)
+    hi = right[1] - 2 if right else max(w, w - slope*h)
+    top = min(0, slope*w)
+    scale = 1 + slope*slope
+    matrix = (1/scale, slope/scale, (lo+slope*top)/scale,
+              -slope/scale, 1/scale, (top-slope*lo)/scale)
+    size = (int(np.ceil(hi-lo)), int(np.ceil(h+abs(slope*w))))
+    result = im.transform(size, Image.Transform.AFFINE, matrix,
+                          Image.Resampling.BICUBIC, fillcolor="white")
+    return result, round(float(np.degrees(np.arctan(slope))), 3)
+
+
+def feeder_edge(gray):
+    """Fit the transition from the feeder backing to paper across the width."""
+    h, w = gray.shape
+    depth = min(h // 9, 380)
+    if depth < 20 or w < 100:
+        return None
+    xs = np.linspace(w*.04, w*.96, 81).astype(int)
+    profiles = np.median(gray[:depth, xs[:, None] + np.arange(-2, 3)], axis=2)
+    hits = []
+    for x, column in zip(xs, profiles.T):
+        # Ignore white wedges added by deskew. Require a run of neutral backing
+        # followed by a sustained rise onto paper, allowing a dark edge shadow.
+        backing = (column >= 105) & (column <= 198)
+        starts = np.flatnonzero(np.convolve(backing.astype(int), np.ones(5), 'valid') == 5)
+        if not starts.size or starts[0] > 45 or np.any(column[:starts[0]] < 100):
+            continue
+        start = starts[0]
+        baseline = np.median(column[start:start+5])
+        light = column > max(197, baseline + 19)
+        ends = np.flatnonzero(np.convolve(light.astype(int), np.ones(5), 'valid') == 5)
+        ends = ends[ends >= start+5]
+        if ends.size and backing[start:ends[0]].mean() >= .58:
+            hits.append((x, ends[0]))
+    if len(hits) < len(xs)*.60:
+        return None
+    x, y = np.asarray(hits).T
+    # Median of widely separated pair slopes rejects isolated printed marks.
+    dx = x[None, :] - x[:, None]
+    wide = dx > w*.3
+    if not wide.any():
+        return None
+    slope = np.median((y[None, :] - y[:, None])[wide] / dx[wide])
+    intercept = np.median(y - slope*x)
+    good = abs(y - slope*x - intercept) < 5
+    if good.sum() < len(xs)*.58 or np.ptp(x[good]) < w*.70 or abs(slope) > .075:
+        return None
+    slope, intercept = np.polyfit(x[good], y[good], 1)
+    return np.clip(np.ceil(intercept + slope*np.arange(w)+1), 0, depth).astype(int)
+
+
+def paper_area(im):
+    aligned, skew = straighten(im.convert("RGB"))
+    gray = np.asarray(aligned.convert("L"))
+    pixels = np.array(aligned)
+    cuts = []
+    for rows, rgb in ((gray, pixels), (gray[::-1], pixels[::-1])):
+        edge = feeder_edge(rows)
+        if edge is None:
+            cuts.append(0)
+            continue
+        depth = int(edge.max())
+        rgb[:depth][np.arange(depth)[:, None] < edge] = 255
+        cuts.append(int(edge.min()))
+    return Image.fromarray(pixels[cuts[0]:len(pixels)-cuts[1]]), skew, cuts
+
+
+def orientation(path, fallback, min_score=8):
+    proc = subprocess.run(["tesseract", str(path), "stdout", "--dpi", "300",
+                           "-l", "osd", "--psm", "0"], capture_output=True, text=True,
+                          env={**os.environ, "LC_ALL": "C"})
+    angle = re.search(r"^Rotate: (0|90|180|270)$", proc.stdout, re.M)
+    score = re.search(r"^Orientation confidence: ([\d.]+)", proc.stdout, re.M)
+    if proc.returncode == 0 and angle and score and float(score[1]) >= min_score:
+        return int(angle[1]), "détectée"
+    return fallback, "repli"
+
+
+def clean_document(im, directory):
+    """Nettoyage Leptonica sur la luminance, décision couleur après correction."""
+    im = im.resize(tuple(max(1, round(v * 2 / 3)) for v in im.size),
+                   Image.Resampling.LANCZOS)
+    gray = im.convert("L")
+    lib = ctypes.CDLL("libleptonica.so.6")
+    ptr = ctypes.c_void_p
+    lib.pixRead.argtypes = [ctypes.c_char_p]
+    lib.pixRead.restype = ptr
+    lib.pixCleanBackgroundToWhite.argtypes = [ptr, ptr, ptr, ctypes.c_float,
+                                             ctypes.c_int, ctypes.c_int]
+    lib.pixCleanBackgroundToWhite.restype = ptr
+    lib.pixWrite.argtypes = [ctypes.c_char_p, ptr, ctypes.c_int]
+    lib.pixDestroy.argtypes = [ctypes.POINTER(ptr)]
+    with tempfile.TemporaryDirectory(dir=directory) as tmp:
+        source = Path(tmp) / "gray.pgm"
+        target = Path(tmp) / "clean.png"
+        gray.save(source)
+        raw = ptr(lib.pixRead(bytes(source)))
+        clean = ptr()
+        try:
+            if raw:
+                clean = ptr(lib.pixCleanBackgroundToWhite(raw, None, None, 1., 30, 185))
+            if not clean or lib.pixWrite(bytes(target), clean, 3):
+                raise ValueError("Échec du nettoyage Leptonica")
+            with Image.open(target) as result:
+                local = np.asarray(result, dtype=np.float32)
+        finally:
+            lib.pixDestroy(ctypes.byref(raw))
+            lib.pixDestroy(ctypes.byref(clean))
+
+    rgb = np.asarray(im, dtype=np.float32)
+    lum = np.asarray(gray, dtype=np.float32)
+    fixed = np.clip((rgb - 27) * (255 / 180), 0, 255)
+    adjusted = np.clip(rgb + (local - lum)[:, :, None] + 3, 0, 255)
+    pixels = np.minimum(adjusted, fixed).astype(np.uint8)
+    neutral = np.ptp(rgb, axis=2) < 23
+    pixels[neutral] = np.minimum(local, fixed.mean(axis=2))[neutral, None]
+    chroma = np.ptp(pixels, axis=2)
+    fraction = float((chroma > 65).mean())
+    is_color = fraction > .002
+    page = Image.fromarray(pixels)
+    if not is_color:
+        page = page.convert("L")
+    # Effacer seulement les longues traces parallèles au bord, dans les 4 mm
+    # extérieurs. Une petite marque isolée ne déclenche pas ce nettoyage.
+    for turn in range(4):
+        band = np.asarray(page.convert("L"))[:32, :]
+        dark_columns = band.min(axis=0) < 237
+        for start, end in np.flatnonzero(np.diff(np.r_[False, dark_columns, False])).reshape(-1, 2):
+            if end - start < page.width * .10:
+                continue
+            for x in range(start, end):
+                depth = np.flatnonzero(band[:, x] < 244)
+                if len(depth) and depth[-1] < len(band)-1:
+                    page.paste("white", (int(x), 0, int(x+1), int(depth[-1]+2)))
+        page = page.transpose(Image.Transpose.ROTATE_90)
+    return ImageOps.expand(page, border=8, fill="white"), fraction
+
+
+def receipt_area(im):
+    gray = im.convert("L")
+    a = np.asarray(gray)
+    h, w = a.shape
+    background = float(np.median(a[h//8:7*h//8:16, [w//50, w-w//50-1]]))
+    threshold = min(204, max(170, background + 22))
+    samples = []
+    for y in np.linspace(h*.08, h*.92, 101).astype(int):
+        xs = np.flatnonzero(a[y] > threshold)
+        if xs.size > w*.10:
+            samples.append((y, xs[0], xs[-1]))
+    if len(samples) < 70:
+        return paper_area(im)
+    y, left, right = np.asarray(samples).T
+    slope, intercept = np.polyfit(y, (left+right)/2, 1)
+    widths = right-left
+    if (abs(slope) > .25 or np.median(widths) > w*.91
+            or np.quantile(abs(widths-np.median(widths)), .9) > w*.035
+            or np.quantile(abs((left+right)/2 - (intercept+slope*y)), .9) > w*.025):
+        return paper_area(im)
+    degrees = float(-np.degrees(np.arctan(slope)))
+    rot = gray.rotate(degrees, Image.Resampling.BICUBIC, expand=True, fillcolor=int(background))
+    a = np.asarray(rot)
+    samples = [np.flatnonzero(a[y] > threshold) for y in
+               np.linspace(rot.height*.10, rot.height*.90, 101).astype(int)]
+    bounds = [(row[0], row[-1]) for row in samples if row.size]
+    l, r = np.median(bounds, axis=0).astype(int)
+    l, r = max(0, l-4), min(rot.width, r+5)
+    rows = np.flatnonzero((a[:, l+10:r-10] > threshold).mean(axis=1) > .25)
+    if not rows.size:
+        return paper_area(im)
+    top, bottom = max(0, rows[0]-4), min(rot.height, rows[-1]+5)
+    return rot.crop((l, top, r, bottom)), round(degrees, 3), [int(top), int(rot.height-bottom)]
+
+
+def receipt_marks(im):
+    gray = im.convert("L")
+    small = gray.resize((max(1, gray.width//3), max(1, gray.height//3)), Image.Resampling.BOX)
+    ink = ImageChops.subtract(small.filter(ImageFilter.MaxFilter(7)), small)
+    layout = np.asarray(ink.resize((24, 128), Image.Resampling.BOX), dtype=float)
+    # Ignorer 1 mm de contour pour le seul veto de contraste ; la carte
+    # recto-verso ci-dessus couvre aussi les marges.
+    smoothed = np.asarray(ink.filter(ImageFilter.BoxBlur(1)))
+    peak = smoothed[4:-4, 4:-4].max() if min(smoothed.shape) > 8 else 255
+    return layout, float(np.percentile(ink, 99)), int(peak)
+
+
+def mirrored_receipt(front, back):
+    # Les cartes d'encre permettent de comparer le motif sur les deux faces
+    # même lorsque le papier n'est pas parfaitement aligné dans le chargeur.
+    recto, strength, _ = front
+    verso, faint, peak = back
+    if strength < 20 or faint > strength*.65 or peak > 125 or verso.std() < 1:
+        return False
+    for mirror in (recto[:, ::-1], recto[::-1, :]):
+        for offset in range(-3, 4):
+            a = mirror[4+offset:124+offset]
+            b = verso[4:124]
+            if a.std() and np.corrcoef(a.ravel(), b.ravel())[0, 1] >= .55:
+                return True
+    return False
+
+
+def run(args):
+    if args.mode == "verifier" and not args.reference:
+        raise ValueError("Indiquer le dossier témoin avec --reference.")
+    if args.reference and (args.mode == "verifier" or args.filtrer):
+        verify(args.reference, args)
+    if args.mode == "verifier":
+        return
+    if args.mode != "multipassage" and len(args.depuis) > 1:
+        raise ValueError("Plusieurs répertoires demandent le mode multipassage.")
+    if not args.depuis:
+        args.device = scanner_device(args.device)
+    args.sortie.mkdir(parents=True, exist_ok=True)
+    job = Path(tempfile.mkdtemp(prefix="scan-", dir=args.sortie)).resolve()
+    event(args, "travail", dossier=str(job))
+    pending = job / "pdf-en-cours"
+    pending.mkdir()
+    groups = []
+    report = []
+    pass_no = 0
+    while True:
+        pass_no += 1
+        folder = job / f"passage-{pass_no:03}"
+        folder.mkdir()
+        event(args, "passage", numero=pass_no)
+        if args.depuis:
+            originals = []
+            for p in pages(args.depuis[pass_no - 1]):
+                originals.append(Path(shutil.copy2(p, folder / p.name)))
+        else:
+            originals = acquire(folder, args.device)
+        for index, p in enumerate(originals):
+            if not groups or (args.mode == "feuille" and index % 2 == 0):
+                groups.append([])
+            if index % 2 == 0:
+                front_angle = 0
+            correction = {}
+            with Image.open(p) as im:
+                ticket = args.profil == "ticket"
+                aligned, skew, cuts = receipt_area(im) if ticket else paper_area(im)
+                correction["marges_verticales_px"] = cuts
+                blank, bright, peak = inspect_page(aligned, verso=index % 2 == 1)
+                if ticket:
+                    marks = receipt_marks(aligned)
+                    if index % 2 == 0:
+                        front_marks = marks
+                    elif mirrored_receipt(front_marks, marks):
+                        blank = True
+                        correction["motif"] = "transparence du recto"
+                kept = not (args.filtrer and blank)
+                if kept:
+                    jpg = p.with_suffix(".jpg")
+                    if ticket:
+                        with tempfile.TemporaryDirectory(dir=folder) as tmp:
+                            cropped = Path(tmp) / "ticket.pgm"
+                            aligned.convert("L").save(cropped)
+                            angle, source = orientation(cropped, front_angle)
+                            if source == "repli":
+                                # Sur papier thermique, confirmer une détection faible
+                                # par une deuxième lecture après un demi-tour.
+                                first, label = orientation(cropped, front_angle, min_score=1)
+                                if label == "détectée":
+                                    aligned.convert("L").rotate(180).save(cropped)
+                                    other, check = orientation(cropped, front_angle, min_score=1)
+                                    if check == "détectée" and (other+180) % 360 == first:
+                                        angle, source = first, "double lecture"
+                    else:
+                        angle, source = orientation(p, front_angle)
+                    if index % 2 == 0:
+                        front_angle = angle
+                    correction.update(rotation_horaire=angle, orientation=source, pente_degres=skew)
+                    upright = aligned.rotate(-angle, expand=True)
+                    if ticket:
+                        cleaned = ImageOps.autocontrast(upright.convert("L"), cutoff=(0, 1))
+                        fraction = 0.0
+                    else:
+                        cleaned, fraction = clean_document(upright, folder)
+                    correction.update(mode_image=cleaned.mode, fraction_coloree=fraction)
+                    dpi = 300 if ticket else 200
+                    cleaned.save(jpg, quality=args.qualite, optimize=True, dpi=(dpi, dpi))
+                    groups[-1].append(jpg)
+            event(args, "face", passage=pass_no, numero=index+1, conserve=kept)
+            report.append(dict(original=str(p.relative_to(job)), pdf=len(groups),
+                               conserve=kept, candidat_blanc=blank,
+                               fraction_claire=bright, contraste_local=peak, **correction))
+        if args.mode != "multipassage":
+            break
+        if args.depuis:
+            if pass_no == len(args.depuis):
+                break
+        else:
+            event(args, "attente", choix=["suivant", "fin"])
+            if args.json:
+                reply = input().strip().lower()
+                if reply not in ("suivant", "fin"):
+                    raise ValueError("Commande attendue sur stdin : suivant ou fin.")
+            else:
+                reply = input("Charger puis Entrée pour continuer, f pour finir : ")
+                while reply.strip().lower() not in ("", "f"):
+                    reply = input("Entrée pour scanner, f pour finir : ")
+            if reply.strip().lower() in ("f", "fin"):
+                break
+    (job / "pages.json").write_text(json.dumps(report, indent=2), encoding="utf8")
+    for n, group in enumerate(groups, 1):
+        if group:
+            subprocess.run(["img2pdf", "-o", str(pending / f"document-{n:03}.pdf"),
+                            *map(str, group)], check=True)
+    pending.rename(job / "pdf")
+    event(args, "termine", pdf=[str(p) for p in sorted((job / "pdf").glob("*.pdf"))],
+          rapport=str(job / "pages.json"), faces=len(report), conservees=sum(r["conserve"] for r in report))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version="ScanStation " + VERSION)
+    parser.add_argument("mode", choices=["verifier", "feuille", "lot", "multipassage"])
+    parser.add_argument("--profil", choices=["document", "ticket"])
+    parser.add_argument("--config", type=Path, default=CONFIG)
+    parser.add_argument("--device", help="identifiant SANE, ou auto")
+    parser.add_argument("--depuis", action="append", type=Path, default=[], help="rejouer un passage PNM")
+    parser.add_argument("--reference", type=Path, help="jeu témoin facultatif de quatre PNM")
+    parser.add_argument("--filtrer", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--sortie", type=Path)
+    parser.add_argument("--qualite", type=int, help="qualité JPEG de 1 à 95")
+    parser.add_argument("--json", action="store_true", help="un événement JSON par ligne")
+    args = parser.parse_args()
+    try:
+        defaults = dict(device=os.getenv("SCANSTATION_DEVICE") or "auto", filtrer=True,
+                        sortie="~/scanstation-travaux", qualite=76, reference="", profil="document")
+        if args.config.exists() or args.config != CONFIG:
+            with args.config.open("rb") as conf:
+                values = tomllib.load(conf)
+            for key, value in values.items():
+                if key not in defaults or type(value) is not type(defaults[key]):
+                    raise ValueError(f"Paramètre de configuration invalide : {key}")
+            defaults.update(values)
+        for key, default in defaults.items():
+            if getattr(args, key) is None:
+                setattr(args, key, default)
+        if args.profil not in ("ticket", "document"):
+            raise ValueError("Profil inconnu")
+        args.sortie = Path(args.sortie).expanduser()
+        args.reference = Path(args.reference).expanduser() if args.reference else None
+        if not 1 <= args.qualite <= 95:
+            raise ValueError("La qualité JPEG doit être comprise entre 1 et 95.")
+        if args.depuis or args.mode == "verifier":
+            run(args)
+        else:
+            lockdir = Path(os.environ.get("XDG_STATE_HOME") or Path.home()/".local/state") / "scanstation"
+            lockdir.mkdir(parents=True, exist_ok=True)
+            with (lockdir / "scanner.lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise ValueError("Un scan est déjà en cours pour cet utilisateur.") from None
+                run(args)
+    except (ValueError, OSError, EOFError, KeyboardInterrupt, subprocess.SubprocessError) as exc:
+        event(args, "erreur", message=str(exc) or "Opération interrompue")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
