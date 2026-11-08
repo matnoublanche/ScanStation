@@ -1,107 +1,70 @@
 # ScanStation
 
-Application en ligne de commande pour le ScanSnap S1300i sous Debian 13, testée sur Raspberry Pi 4. Un appel à `scanstation` pilote le travail complet. Le même exécutable sert depuis SSH et depuis l’interface tactile.
+Turn a Raspberry Pi 4 and a ScanSnap S1300i into a duplex scanner. Use the hardware button, an SSH command, or a local application. Choose a PDF per sheet, one per batch, or a single PDF across multiple feeder loads. The receipt profile crops narrow thermal paper and checks for mirrored print showing through on the back.
 
-## Installer
+## Install or update
 
-Brancher un S1300i déjà fonctionnel avec SANE et son firmware. L’utilisateur qui lancera ScanStation doit pouvoir numériser avec `scanimage`. L’installateur utilise les paquets Debian, dont Leptonica 6. Il faut un index APT à jour et un accès sudo pour installer les dépendances et la commande. Depuis le projet décompressé, lancer avec le compte habituel du Pi :
-
-```sh
-sh install.sh
-scanstation --version
-```
-
-### Installer ou mettre à jour depuis GitHub
-
-Exécuter cette commande sur le Raspberry Pi avec le compte de numérisation. Git récupère la branche principale publique dans un dossier temporaire. L’installateur utilise les fichiers de cette même révision et conserve la configuration existante.
+Use Debian 13 with Git, current APT indexes and a working SANE installation for the S1300i, including its firmware. Run as the user who will scan, with sudo access for installation. Confirm that this account can see the scanner with `scanimage -L`.
 
 ```sh
 (set -e; d=$(mktemp -d); trap 'rm -rf "$d"' EXIT; git clone -q --depth 1 https://github.com/matnoublanche/ScanStation.git "$d"; sh "$d/install.sh")
+scanstation --version
 ```
 
-Le dépôt matnoublanche/ScanStation est la source de référence. Publier chaque changement sur GitHub, puis exécuter cette même commande pour déployer sur le Pi.
+From a checkout, run `sh install.sh`. The installer installs Debian packages, updates the command in `/usr/local/bin` and starts `scanstation-button.service` under the scanning account at boot. Local settings and previous scans survive updates. Publish changes to GitHub before running the installer on the Pi.
 
-## Utiliser depuis SSH
+## Scan from SSH
 
 ```sh
-scanstation lot
-scanstation feuille
-scanstation multipassage
-scanstation lot --no-filtrer --qualite 85
-scanstation lot --depuis /chemin/vers/passage-001
-scanstation multipassage --depuis /chemin/passage-001 --depuis /chemin/passage-002
+scanstation batch
+scanstation sheet
+scanstation multipass
+scanstation batch --profile receipt
+scanstation batch --no-filter --quality 85
+scanstation batch --profile receipt --replay /path/to/original-pass
+scanstation multipass --replay /path/to/first-pass --replay /path/to/next-pass
 ```
 
-- **lot** assemble toutes les faces conservées dans un PDF.
-- **feuille** produit un PDF par paire recto-verso contenant au moins une face conservée.
-- **multipassage** assemble les chargements successifs en un PDF. En SSH, charger les feuilles puis appuyer sur Entrée pour continuer, ou saisir `f` pour finaliser.
-- **verifier** vérifie un jeu témoin avec les quatre fichiers `page-001.pnm` à `page-004.pnm`. Résultat attendu : 001, 003 et 004 conservées. Exemple : `scanstation verifier --reference ~/scanstation-test/duplex`.
+**Batch** combines retained sides into one PDF. **Sheet** creates a PDF for each physical sheet with at least one retained side. **Multipass** joins successive feeder loads. In an interactive shell, press Enter to add a load or type `f` to finish.
 
-Chaque exécution de scan crée un dossier de travail distinct. Le moteur acquiert en duplex couleur à 300 ppp, redresse et recadre, classe les faces, détermine l’orientation, nettoie le fond avec Leptonica, choisit gris ou couleur et assemble les JPEG à 200 ppp avec img2pdf. Les PNM de toutes les faces sont conservés. Le dossier `pdf/` apparaît quand l’assemblage de tout le travail est terminé. `pages.json` contient les décisions par face. L’OCR documentaire est laissé à Paperless. Cette version produit les fichiers localement.
+Each job has its own directory. Original PNM images are kept for every side, even those excluded from the PDF. Replay accepts consecutive `page-N.pnm` files beginning at 1, with an even number of sides. `pages.json` records per-side decisions. Final PDFs appear together in `pdf/` when assembly finishes. An entirely blank batch produces an empty PDF list.
 
-## Paramétrer
+The document profile acquires color at 300 dpi, deskews, crops feeder edges, filters blank sides, detects orientation, cleans the background with Leptonica, chooses grayscale or color, and exports 200 dpi JPEGs with img2pdf. The receipt profile exports grayscale at 300 dpi. It compares the back with a registered mirror of the front before discarding show-through. Use `--no-filter` to retain both sides, including faint notes. The SANE driver determines the maximum receipt length. Output is local. Paperless can perform document OCR downstream.
 
-La configuration est dans `~/.config/scanstation/config.toml` (ou sous `XDG_CONFIG_HOME`). Les options de la commande ont priorité. `--config CHEMIN` sélectionne un autre fichier.
+## Physical button and touchscreen API
 
-| Configuration | Option | Effet |
+```sh
+scanstation select receipt --start-if-loaded --json
+scanstation select multipass
+scanstation start --json
+scanstation status --json
+scanstation next
+scanstation finish
+```
+
+A touchscreen can call `select MODE --start-if-loaded` with `sheet`, `batch`, `multipass` or `receipt`. An empty feeder saves the choice for later. With paper loaded, the command starts the job immediately. Plain `select MODE` only saves the choice. Pressing the hardware button or running `start` uses the saved mode. The initial selection is batch. During a multipass wait, reload the feeder and press the button or use `next`. Use `finish` to assemble the PDF. The service ignores a second start while busy. Press and release the scanner button; epjitsu refreshes sensor status roughly once per second.
+
+Controller commands return a snapshot. Poll `status --json` for progress. Its fields include `mode`, `status` (ready, scan, waiting, finalizing or busy), `loaded` (null when unavailable), `sensor_error`, `progress` and `last`. Selection survives service restarts. The last result stays in memory until the next result or restart. Direct SSH scanning is synchronous and does not change the selected mode.
+
+## Configuration
+
+Set defaults in `~/.config/scanstation/config.toml` or select another file with `--config PATH`. Command options take priority.
+
+| Setting | Command option | Meaning |
 |---|---|---|
-| `device = "auto"` | `--device` | Détecter le périphérique epjitsu ou fournir son identifiant SANE. Si plusieurs sont présents, choisir explicitement. |
-| `sortie = "~/scanstation-travaux"` | `--sortie` | Dossier parent des travaux. |
-| `filtrer = true` | `--filtrer` ou `--no-filtrer` | Écarter les faces classées vierges du PDF. Un travail entièrement vierge donne une liste de PDF vide. |
-| `qualite = 76` | `--qualite` | Qualité JPEG, de 1 à 95. |
-| `reference` (facultatif) | `--reference` | Contrôler les témoins avant de filtrer. En scan physique, le papier est acquis immédiatement et les originaux restent disponibles si le contrôle échoue. |
+| device | --device | SANE device identifier, or auto for a single epjitsu device |
+| output | --output | Job directory, default ~/scanstation-jobs |
+| filter | --filter / --no-filter | Remove blank sides by default |
+| quality | --quality | JPEG quality from 1 to 95, default 76 |
+| profile | --profile | document (default) or receipt |
+| reference | --reference | Optional reference directory |
 
-Une installation neuve fonctionne sans documents personnels. Si le dossier témoin historique se trouve dans le compte du Pi lors de la première installation, l’installateur le renseigne. Pour capturer un nouveau lot, omettre `--depuis`. Pour le rejouer, fournir un dossier contenant des `page-N.pnm` consécutives à partir de 1 et un nombre pair de faces.
+Run `scanstation verify --reference PATH` to check four reference images named `page-001.pnm` through `page-004.pnm`. The expected retained sides are 001, 003 and 004. If a reference directory is configured, filtered jobs check it before processing. Physical acquisition starts immediately and the originals survive a failed reference check.
 
-## Brancher l’écran tactile
+## Engine events
 
-Lancer un seul processus en arrière-plan avec un tableau d’arguments, par exemple `["/usr/local/bin/scanstation", "lot", "--filtrer", "--json"]`. Lire stdout ligne par ligne (UTF-8, un objet JSON par ligne) et lire stderr séparément pour les diagnostics des outils. Ne pas bloquer la boucle d’affichage de LVGL. Le verrou par utilisateur empêche deux acquisitions physiques ScanStation simultanées.
+Pass `--json` to a direct scan for UTF-8 newline-delimited JSON on stdout. Read stderr separately for driver diagnostics. Events include `reference`, `job` (directory), `pass` (number), `side` (pass_number, number, kept), `waiting` (choices), `completed` (pdf, report, sides, kept_count) and `error` (message). In a direct physical multipass job, write `next\n` or `finish\n` to stdin when waiting. Replays use all supplied pass directories automatically. A successful job exits with 0, a job error with 1 and invalid arguments with 2.
 
-| Événement stdout | Données pour l’écran |
-|---|---|
-| `reference` | Décision sur une face témoin, si configurée. |
-| `travail` | `dossier`, chemin absolu du nouveau travail. |
-| `passage` | `numero`, début de l’acquisition ou du rejeu du passage. |
-| `face` | `passage`, `numero`, `conserve` après traitement de la face. |
-| `attente` | En multipassage physique, proposer « Passage suivant » et « Terminer ». Écrire `suivant\n` ou `fin\n` sur stdin et vider le tampon. |
-| `termine` | `pdf` (liste de chemins absolus), `rapport`, `faces`, `conservees`. |
-| `erreur` | `message` à afficher. Les originaux déjà acquis sont conservés. |
+## Upgrading from 0.3
 
-Un travail réussi se termine avec le code 0. Une erreur de travail renvoie 1 ; des arguments invalides renvoient 2 avec un diagnostic sur stderr. Traiter aussi une sortie non nulle sans événement final. En multipassage automatique depuis des dossiers PNM, tous les passages sont déjà fournis ; aucun échange sur stdin n’est nécessaire.
-
-## Tickets de caisse (0.2.0)
-
-Utiliser `scanstation lot --profil ticket` ou ajouter `--profil ticket --json` à l’appel du tactile. Le profil document reste le choix par défaut. Le profil ticket repère le papier clair sur le fond du chargeur, corrige son inclinaison, estime le sens de lecture sur le ticket recadré et produit un JPEG gris à 300 ppp. En duplex, le filtre compare les motifs du verso avec leur reflet sur le recto. Un verso faible et suffisamment corrélé est classé comme transparent. Utiliser `--no-filtrer` pour conserver les deux faces, notamment pour un ticket avec de faibles annotations au dos. Les originaux restent disponibles. La longueur maximale dépend du pilote SANE.
-
-## Bouton physique et commande de l’écran (0.3.0)
-
-Installer sous le compte qui pilotera le scanner. L’installateur active le service
-système `scanstation-bouton.service` sous ce compte, y compris après redémarrage
-sans session ouverte. La première sélection est **lot**.
-
-```sh
-scanstation choisir ticket --demarrer-si-charge --json
-scanstation choisir multipassage
-scanstation demarrer --json
-scanstation etat --json
-scanstation suivant
-scanstation terminer
-```
-
-Une touche tactile appelle `choisir MODE --demarrer-si-charge` avec
-`feuille`, `lot`, `multipassage` ou `ticket`. Le mode est mémorisé dans
-`~/.local/state/scanstation/selection`. Chargeur vide, la sélection attend
-le prochain appui ; chargeur rempli, l’acquisition démarre immédiatement.
-`choisir MODE` seul sélectionne sans lancer. Un appui physique ou `demarrer`
-lance ensuite la sélection mémorisée. L’appel de contrôle revient dès le
-démarrage ; interroger `etat --json` pour la progression et le résultat.
-Les commandes historiques de scan restent synchrones et indépendantes de la sélection.
-
-Les états sont `pret`, `scan`, `attente`, `finalisation` ou `occupe`
-(scan SSH indépendant). En attente multipassage, charger puis appuyer sur
-le bouton physique ou utiliser `suivant`. `terminer` assemble le PDF.
-Un second départ pendant un travail est refusé. Au repos, appuyer puis relâcher
-le bouton ; le pilote epjitsu actualise ses capteurs environ une fois par seconde.
-Le champ `charge` vaut null quand le capteur est indisponible ; `erreur_capteur`
-précise les erreurs. Le dernier résultat du service est dans `dernier`
-jusqu’au prochain résultat ou redémarrage du service. Les PDF persistent sur disque.
+Version 0.4 uses English commands, options, JSON fields, events and report keys. Update external clients together with the Pi. The installer replaces the previous button service. Existing configuration keys and saved mode names are read automatically. The output location configured on an existing installation is preserved. Historical reports retain their original keys.

@@ -1,7 +1,7 @@
 device = "auto"
-sortie = "~/scanstation-travaux"
-filtrer = true
-qualite = 76
-# Facultatif : contrôler les quatre témoins avant le filtrage.
-# reference = "/home/pi/scanstation-test/duplex"
-profil = "document"  # document ou ticket
+output = "~/scanstation-jobs"
+filter = true
+quality = 76
+profile = "document"  # document or receipt
+# Optional four-image reference set, checked before filtering.
+# reference = "~/scanstation-test/duplex"

@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-# Si l'installateur arrive sur stdin, télécharger les fichiers à la même révision.
+# Fetch files at the same revision when installing via stdin.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 trap 'exit 1' HUP INT TERM
@@ -13,14 +13,14 @@ if [ "$#" -eq 2 ]; then
 elif [ "$#" -eq 0 ]; then
     src=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 else
-    echo 'Usage : sh install.sh [propriétaire/dépôt révision]' >&2
+    echo 'Usage: sh install.sh [owner/repository revision]' >&2
     exit 2
 fi
 test -s "$src/scanstation" && test -s "$src/config.example.toml" || exit 1
 as_root() {
     if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
 }
-if [ ! -r /etc/debian_version ]; then echo 'Debian 13 requis.' >&2; exit 1; fi
+if [ ! -r /etc/debian_version ]; then echo 'Debian 13 required.' >&2; exit 1; fi
 as_root apt-get install -y python3 python3-numpy python3-pil python3-sane libleptonica6 sane-utils img2pdf tesseract-ocr tesseract-ocr-osd
 /usr/bin/python3 "$src/scanstation" --version
 confdir=${XDG_CONFIG_HOME:-"$HOME/.config"}/scanstation
@@ -34,10 +34,10 @@ if [ ! -e "$confdir/config.toml" ]; then
 fi
 as_root install -d /usr/local/bin /usr/local/lib/scanstation
 account=$(id -un)
-# Le service système tourne sous le compte de numérisation, même sans session SSH.
-cat > "$tmp/scanstation-bouton.service" <<EOF
+# Run under the scanning account, even with no active SSH session.
+cat > "$tmp/scanstation-button.service" <<EOF
 [Unit]
-Description=ScanStation - bouton physique et commandes locales
+Description=ScanStation - hardware button and local control
 After=local-fs.target
 
 [Service]
@@ -51,12 +51,17 @@ UMask=0077
 WantedBy=multi-user.target
 EOF
 as_root install -m 644 "$src/controller.py" /usr/local/lib/scanstation/controller.py
-as_root install -m 644 "$tmp/scanstation-bouton.service" /etc/systemd/system/scanstation-bouton.service
+as_root install -m 644 "$tmp/scanstation-button.service" /etc/systemd/system/scanstation-button.service
 target=$(as_root mktemp /usr/local/bin/.scanstation.XXXXXX)
 as_root install -m 755 "$src/scanstation" "$target"
 as_root mv -f "$target" /usr/local/bin/scanstation
-printf 'Commande installée : scanstation\nConfiguration : %s/config.toml\n' "$confdir"
+printf 'Installed command: scanstation\nConfiguration: %s/config.toml\n' "$confdir"
 
+# Retire the previous unit name so only one process owns the scanner.
+if [ -f /etc/systemd/system/scanstation-bouton.service ]; then
+    as_root systemctl disable --now scanstation-bouton.service
+    as_root rm -f /etc/systemd/system/scanstation-bouton.service
+fi
 as_root systemctl daemon-reload
-as_root systemctl enable scanstation-bouton.service
-as_root systemctl restart scanstation-bouton.service
+as_root systemctl enable scanstation-button.service
+as_root systemctl restart scanstation-button.service
