@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 from PIL import ImageOps, Image, ImageChops, ImageFilter
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 
@@ -367,7 +367,7 @@ def mirrored_receipt(front, back):
 def run(args):
     if args.mode == "verifier" and not args.reference:
         raise ValueError("Indiquer le dossier témoin avec --reference.")
-    if args.reference and (args.mode == "verifier" or args.filtrer):
+    if args.reference and (args.mode == "verifier" or (args.depuis and args.filtrer)):
         verify(args.reference, args)
     if args.mode == "verifier":
         return
@@ -398,6 +398,8 @@ def run(args):
                 originals.append(Path(shutil.copy2(p, folder / p.name)))
         else:
             originals = acquire(folder, args.device)
+            if pass_no == 1 and args.reference and args.filtrer:
+                verify(args.reference, args)
         for index, p in enumerate(originals):
             if not groups or (args.mode == "feuille" and index % 2 == 0):
                 groups.append([])

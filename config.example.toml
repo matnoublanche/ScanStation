@@ -2,6 +2,6 @@ device = "auto"
 sortie = "~/scanstation-travaux"
 filtrer = true
 qualite = 76
-# Facultatif : contrôler les quatre témoins avant chaque lot filtré.
+# Facultatif : contrôler les quatre témoins avant le filtrage.
 # reference = "/home/pi/scanstation-test/duplex"
 profil = "document"  # document ou ticket

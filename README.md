@@ -49,7 +49,7 @@ La configuration est dans `~/.config/scanstation/config.toml` (ou sous `XDG_CONF
 | `sortie = "~/scanstation-travaux"` | `--sortie` | Dossier parent des travaux. |
 | `filtrer = true` | `--filtrer` ou `--no-filtrer` | Écarter les faces classées vierges du PDF. Un travail entièrement vierge donne une liste de PDF vide. |
 | `qualite = 76` | `--qualite` | Qualité JPEG, de 1 à 95. |
-| `reference` (facultatif) | `--reference` | Rejouer le contrôle témoin avant chaque travail filtré. En cas de désaccord, le travail s’arrête avant l’acquisition. |
+| `reference` (facultatif) | `--reference` | Contrôler les témoins avant de filtrer. En scan physique, le papier est acquis immédiatement et les originaux restent disponibles si le contrôle échoue. |
 
 Une installation neuve fonctionne sans documents personnels. Si le dossier témoin historique se trouve dans le compte du Pi lors de la première installation, l’installateur le renseigne. Pour capturer un nouveau lot, omettre `--depuis`. Pour le rejouer, fournir un dossier contenant des `page-N.pnm` consécutives à partir de 1 et un nombre pair de faces.
 

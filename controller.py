@@ -33,6 +33,7 @@ class Sensors:
         self.sane = sane
         sane.init()
         self.dev = self.guard = None
+        self.device_name = None
 
     def close(self):
         try:
@@ -56,6 +57,7 @@ class Sensors:
                     raise ValueError("Brancher le scanner ou préciser device dans config.toml.")
                 device = names[0]
             self.dev = self.sane.open(device)
+            self.device_name = device
         # L'option SANE "scan" porte le même nom que la méthode Python scan().
         pressed = self.dev.dev.get_option(self.dev.opt["scan"].index)
         return bool(pressed), bool(self.dev.page_loaded)
@@ -100,14 +102,15 @@ class Controller:
             self.sensors.close()
             return None
 
-    async def start(self):
+    async def start(self, origin):
+        print(f"Départ {origin} : {self.mode}", flush=True)
         self.sensors.close()
         self.loaded = None
         self.armed = False
         mode = "lot" if self.mode == "ticket" else self.mode
         profile = "ticket" if self.mode == "ticket" else "document"
         self.proc = await asyncio.create_subprocess_exec(
-            ENGINE, mode, "--profil", profile, "--json", stdin=asyncio.subprocess.PIPE,
+            ENGINE, mode, "--device", self.sensors.device_name, "--profil", profile, "--json", stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE)
         self.phase = "scan"
         self.progress = None
@@ -154,7 +157,7 @@ class Controller:
                             if self.phase == "attente":
                                 await self.resume("suivant")
                             else:
-                                await self.start()
+                                await self.start("bouton")
                 else:
                     self.sensors.close()
                     self.loaded = None
@@ -184,7 +187,7 @@ class Controller:
                 if action == "demarrer" or command.get("si_charge"):
                     await self.sample()
                     if self.loaded:
-                        await self.start()
+                        await self.start("commande")
                     elif action == "demarrer" or self.hardware_error:
                         raise ValueError(self.hardware_error or "Chargeur vide.")
             else:
