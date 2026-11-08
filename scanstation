@@ -531,7 +531,7 @@ def main():
                     value = "receipt"
                 if key not in defaults or type(value) is not type(defaults[key]):
                     raise ValueError(f"Invalid configuration setting : {key}")
-            defaults.update(values)
+                defaults[key] = value
         for key, default in defaults.items():
             if getattr(args, key) is None:
                 setattr(args, key, default)
