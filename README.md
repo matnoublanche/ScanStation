@@ -72,3 +72,36 @@ Un travail réussi se termine avec le code 0. Une erreur de travail renvoie 1 ; 
 ## Tickets de caisse (0.2.0)
 
 Utiliser `scanstation lot --profil ticket` ou ajouter `--profil ticket --json` à l’appel du tactile. Le profil document reste le choix par défaut. Le profil ticket repère le papier clair sur le fond du chargeur, corrige son inclinaison, estime le sens de lecture sur le ticket recadré et produit un JPEG gris à 300 ppp. En duplex, le filtre compare les motifs du verso avec leur reflet sur le recto. Un verso faible et suffisamment corrélé est classé comme transparent. Utiliser `--no-filtrer` pour conserver les deux faces, notamment pour un ticket avec de faibles annotations au dos. Les originaux restent disponibles. La longueur maximale dépend du pilote SANE.
+
+## Bouton physique et commande de l’écran (0.3.0)
+
+Installer sous le compte qui pilotera le scanner. L’installateur active le service
+système `scanstation-bouton.service` sous ce compte, y compris après redémarrage
+sans session ouverte. La première sélection est **lot**.
+
+```sh
+scanstation choisir ticket --demarrer-si-charge --json
+scanstation choisir multipassage
+scanstation demarrer --json
+scanstation etat --json
+scanstation suivant
+scanstation terminer
+```
+
+Une touche tactile appelle `choisir MODE --demarrer-si-charge` avec
+`feuille`, `lot`, `multipassage` ou `ticket`. Le mode est mémorisé dans
+`~/.local/state/scanstation/selection`. Chargeur vide, la sélection attend
+le prochain appui ; chargeur rempli, l’acquisition démarre immédiatement.
+`choisir MODE` seul sélectionne sans lancer. Un appui physique ou `demarrer`
+lance ensuite la sélection mémorisée. L’appel de contrôle revient dès le
+démarrage ; interroger `etat --json` pour la progression et le résultat.
+Les commandes historiques de scan restent synchrones et indépendantes de la sélection.
+
+Les états sont `pret`, `scan`, `attente`, `finalisation` ou `occupe`
+(scan SSH indépendant). En attente multipassage, charger puis appuyer sur
+le bouton physique ou utiliser `suivant`. `terminer` assemble le PDF.
+Un second départ pendant un travail est refusé. Au repos, appuyer puis relâcher
+le bouton ; le pilote epjitsu actualise ses capteurs environ une fois par seconde.
+Le champ `charge` vaut null quand le capteur est indisponible ; `erreur_capteur`
+précise les erreurs. Le dernier résultat du service est dans `dernier`
+jusqu’au prochain résultat ou redémarrage du service. Les PDF persistent sur disque.

@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 from PIL import ImageOps, Image, ImageChops, ImageFilter
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 
@@ -374,7 +374,11 @@ def run(args):
     if args.mode != "multipassage" and len(args.depuis) > 1:
         raise ValueError("Plusieurs répertoires demandent le mode multipassage.")
     if not args.depuis:
-        args.device = scanner_device(args.device)
+        # Le contrôleur relâche le capteur dès que scanner.lock est pris.
+        lockdir = Path(os.environ.get("XDG_STATE_HOME") or Path.home()/".local/state") / "scanstation"
+        with (lockdir / "device.lock").open("a") as gate:
+            fcntl.flock(gate, fcntl.LOCK_EX)
+            args.device = scanner_device(args.device)
     args.sortie.mkdir(parents=True, exist_ok=True)
     job = Path(tempfile.mkdtemp(prefix="scan-", dir=args.sortie)).resolve()
     event(args, "travail", dossier=str(job))
@@ -476,7 +480,10 @@ def run(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    actions = ("choisir", "demarrer", "etat", "suivant", "terminer")
+    if sys.argv[1:2] and sys.argv[1] in actions:
+        os.execv(sys.executable, [sys.executable, "/usr/local/lib/scanstation/controller.py", *sys.argv[1:]])
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Contrôle du bouton : " + ", ".join(actions))
     parser.add_argument("--version", action="version", version="ScanStation " + VERSION)
     parser.add_argument("mode", choices=["verifier", "feuille", "lot", "multipassage"])
     parser.add_argument("--profil", choices=["document", "ticket"])
