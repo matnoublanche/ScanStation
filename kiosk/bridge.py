@@ -26,7 +26,7 @@ def view(state, now):
     if not online and phase == "ready":
         scanner = "Scanner offline"
     elif phase == "ready":
-        scanner = "Paper loaded" if loaded else "Ready"
+        scanner = "Ready  /  paper loaded" if loaded else "Ready  /  load paper"
     elif waiting:
         scanner = "Load next pass"
     elif phase == "scan":
@@ -133,7 +133,10 @@ async def main():
     finally:
         bridge.close()
         if proc.returncode is None:
-            proc.terminate()
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
         await proc.wait()
 
 
