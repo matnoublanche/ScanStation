@@ -11,3 +11,6 @@ auto_name = true
 paperless_url = ""
 paperless_token_file = "~/.config/scanstation/paperless.token"
 paperless_inbox_tag = "inbox"
+
+# Touchscreen only: en or fr. Restart scanstation-kiosk after changing.
+ui_language = "en"

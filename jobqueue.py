@@ -63,12 +63,24 @@ class Queue:
             self.db.execute("UPDATE jobs SET state=?,latest=?,updated=? WHERE id=?", (state,data,now,job))
 
     def snapshot(self):
-        rows = self.db.execute("""SELECT id,state,queued,updated,latest FROM jobs
-            WHERE state IN ('queued','processing') OR id IN
+        rows = self.db.execute("""SELECT id,state,queued,updated,latest,options FROM jobs
+            WHERE state IN ('queued','processing') OR id IN (SELECT job FROM deliveries WHERE state!='delivered') OR id IN
             (SELECT id FROM jobs WHERE state IN ('completed','failed') ORDER BY updated DESC LIMIT 8)
             ORDER BY queued,rowid""")
-        return [dict(id=r['id'], state=r['state'], queued=r['queued'], updated=r['updated'],
-                     progress=json.loads(r['latest']) if r['latest'] else None) for r in rows]
+        result = []
+        for row in rows:
+            opts = json.loads(row["options"])
+            result.append(dict(id=row["id"], state=row["state"], queued=row["queued"], updated=row["updated"],
+                               sides=opts.get("sides"), mode=opts.get("mode"), upload=bool(opts.get("paperless_url")),
+                               progress=json.loads(row["latest"]) if row["latest"] else None))
+        return result
+
+    def delivery_counts(self):
+        # Include all PDFs, including verified imports outside the short UI history.
+        return {r["job"]: dict(total=r["total"], verified=r["verified"], updated=r["updated"])
+                for r in self.db.execute("""SELECT job, count(*) total, sum(state='delivered') verified,
+                    max(updated) updated FROM deliveries GROUP BY job
+                    HAVING verified < total OR updated > ?""", (time.time()-30,))}
 
     def delivery_status(self):
         return [dict(r) for r in self.db.execute("""SELECT id,job,path,state,task,doc,tag_id,explicit_tag,repair,error,updated

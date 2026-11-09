@@ -7,7 +7,7 @@ trap 'exit 1' HUP INT TERM
 if [ "$#" -eq 2 ]; then
     base="https://raw.githubusercontent.com/$1/$2"
     mkdir -p "$tmp/kiosk"
-    for file in kiosk/main.c kiosk/bridge.py kiosk/CMakeLists.txt kiosk/lv_conf.h kiosk/install.sh kiosk/scanstation-kiosk.service scanstation controller.py jobqueue.py delivery.py config.example.toml; do
+    for file in kiosk/main.c kiosk/bridge.py kiosk/i18n.py kiosk/workload.py kiosk/CMakeLists.txt kiosk/lv_conf.h kiosk/install.sh kiosk/scanstation-kiosk.service scanstation controller.py jobqueue.py delivery.py config.example.toml; do
         curl -fsSL "$base/$file" -o "$tmp/$file"
     done
     src=$tmp

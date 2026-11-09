@@ -23,7 +23,7 @@ sys.path.append("/usr/local/lib/scanstation")
 from jobqueue import Queue, STATE
 import time
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 
@@ -135,7 +135,7 @@ def pages(directory):
     return [p for _, p in found]
 
 
-def acquire(dest, device, args, pass_no):
+def acquire(dest, device, args, pass_no, previous=0):
     cmd = ["scanimage", "-d", device, "--source", "ADF Duplex", "--mode", "Color",
            "--resolution", "300", "--page-height", "0", "--format=pnm", "--batch=page-%06d.pnm"]
     with subprocess.Popen(cmd, cwd=dest, stderr=subprocess.PIPE, text=True,
@@ -145,7 +145,7 @@ def acquire(dest, device, args, pass_no):
             match = re.match(r"Scanned page (\d+)\b", line)
             if match:
                 event(args, "progress", stage="captured", pass_number=pass_no,
-                      side=int(match[1]), total_sides=None)
+                      side=int(match[1]), captured=previous+int(match[1]), total_sides=None)
         result.wait()
     # SANE_STATUS_NO_DOCS (7) is expected at the end of the feeder.
     if result.returncode not in (0, 7):
@@ -604,17 +604,19 @@ def capture(args):
     job = Path(tempfile.mkdtemp(prefix="scan-", dir=args.output)).resolve()
     event(args, "job", directory=str(job), mode=args.mode, profile=args.profile)
     pass_no = 0
+    captured = 0
     while True:
         pass_no += 1
         folder = job / f"pass-{pass_no:03}"
         folder.mkdir()
-        event(args, "pass", number=pass_no)
+        event(args, "pass", number=pass_no, captured=captured)
         if args.replay:
             originals = []
             for p in pages(args.replay[pass_no - 1]):
                 originals.append(Path(shutil.copy2(p, folder / p.name)))
         else:
-            originals = acquire(folder, args.device, args, pass_no)
+            originals = acquire(folder, args.device, args, pass_no, captured)
+        captured += len(originals)
         # Persist the input files before committing the queue entry.
         for original in originals:
             sync_path(original)
@@ -625,7 +627,7 @@ def capture(args):
             if pass_no == len(args.replay):
                 break
         else:
-            event(args, "waiting", choices=["next", "finish"])
+            event(args, "waiting", captured=captured, choices=["next", "finish"])
             if args.json:
                 reply = input().strip().lower()
                 if reply not in ("next", "finish"):
@@ -637,7 +639,7 @@ def capture(args):
             if reply.strip().lower() in ("f", "finish"):
                 break
     options = {k: getattr(args,k) for k in ("mode","profile","filter","quality","auto_name")}
-    options.update(paperless_url=args.paperless_url, paperless_token_file=str(Path(args.paperless_token_file).expanduser().resolve()),
+    options.update(sides=captured, passes=pass_no, paperless_url=args.paperless_url, paperless_token_file=str(Path(args.paperless_token_file).expanduser().resolve()),
                    paperless_inbox_tag=args.paperless_inbox_tag)
     options["reference"] = str(args.reference.resolve()) if args.reference else None
     sync_path(job)
@@ -663,6 +665,7 @@ def process(args, job):
     final_names = []
     report = []
     folders = sorted(job.glob("pass-*"), key=lambda f: int(f.name.split("-")[1]))
+    processed = 0
     for pass_no, folder in enumerate(folders, 1):
         originals = pages(folder)
         for index, p in enumerate(originals):
@@ -670,7 +673,7 @@ def process(args, job):
                 groups.append([])
             if index % 2 == 0:
                 front_angle = 0
-            position = dict(pass_number=pass_no, side=index+1, total_sides=len(originals),
+            position = dict(processed=processed, pass_number=pass_no, side=index+1, total_sides=len(originals),
                             document=len(groups), sheet=index//2+1, total_sheets=len(originals)//2,
                             total_documents=None if args.mode in ("sheet", "page") else 1)
             event(args, "progress", stage="crop", **position)
@@ -743,7 +746,8 @@ def process(args, job):
                             lines = header_lines(upright)
                         titles[len(groups)] = document_name(lines, receipt, "Scan")
                     groups[-1].append(jpg)
-            event(args, "side", pass_number=pass_no, number=index+1, kept=kept)
+            processed += 1
+            event(args, "side", processed=processed, pass_number=pass_no, number=index+1, kept=kept)
             report.append(dict(original=str(p.relative_to(job)), pdf=len(groups),
                                kept=kept, blank_candidate=blank,
                                bright_fraction=bright, local_contrast=peak, **correction))
@@ -835,6 +839,8 @@ def main():
                 values = tomllib.load(conf)
             legacy = {"filtrer": "filter", "sortie": "output", "qualite": "quality", "profil": "profile"}
             for key, value in values.items():
+                if key == "ui_language" and value in ("fr", "en"):
+                    continue
                 key = legacy.get(key, key)
                 if key == "profile" and value == "ticket":
                     value = "receipt"

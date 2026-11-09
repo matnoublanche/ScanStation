@@ -151,3 +151,19 @@ Optional settings in /etc/default/scanstation-kiosk: SCANSTATION_FB,
 SCANSTATION_TOUCH, SCANSTATION_SWAP (0/1), and SCANSTATION_CALIBRATION
 (minX,minY,maxX,maxY in raw units after the optional swap; reverse either
 pair for an inverted axis). Restart the kiosk after changes.
+
+### Touchscreen language and progress (0.9)
+
+Set `ui_language = "fr"` or `ui_language = "en"` in the scanning user's
+config.toml and restart `scanstation-kiosk.service`. English is the default.
+This setting translates the display, including touch actions, scanning stages
+and delivery messages. Commands, filenames and the JSON API retain their existing semantics.
+
+The footer tracks overlapping batches. During acquisition alone, a moving
+segment and the acquired sheet count indicate activity while the feeder total is
+unknown. After capture the estimate weights each side once for capture, four
+times for image processing, once for PDF assembly and once for delivery when
+enabled. Additional batches increase the workload. Assembly uses the PDF count
+after blank filtering. Upload progress counts imports verified with the Inbox
+tag across the whole job, including jobs with more than eight documents.
+The percentage describes work completed rather than time remaining.

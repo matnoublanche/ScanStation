@@ -1,5 +1,8 @@
 """Translate controller state into a small view model for the LVGL display."""
 import asyncio
+import fcntl
+import struct
+import tomllib
 import json
 import os
 from pathlib import Path
@@ -9,33 +12,43 @@ import time
 
 STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home()/".local/state") / "scanstation"
 MODES = ("page", "batch", "multipass", "receipt")
-STAGES = {"crop":"Cropping", "filter":"Checking blank sides", "check_text":"Checking text",
-          "orient":"Rotating", "clean":"Cleaning", "name":"Reading title",
-          "verify_reference":"Checking reference", "assemble":"Creating PDF"}
-DELIVERY = {"queued":"Queued for Paperless", "sending":"Sending to Paperless",
-            "consuming":"Paperless processing", "verifying":"Checking Inbox",
-            "failed":"Paperless delivery failed", "uncertain":"Check Paperless delivery"}
+if __package__:
+    from .i18n import message
+    from .workload import Workload
+else:
+    from i18n import message
+    from workload import Workload
 
 
-def view(state, now):
+def language():
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home()/".config") / "scanstation/config.toml"
+    if not config.exists():
+        return "en"
+    value = tomllib.loads(config.read_text()).get("ui_language", "en")
+    return value if value in ("en", "fr") else "en"
+
+
+def view(state, now, lang="en"):
+    def tr(key, **kw):
+        return message(lang, key, **kw)
     phase = state["status"]
     progress = state.get("progress") or {}
     loaded = state.get("loaded")
     waiting = phase == "waiting"
     online = not state.get("sensor_error")
     if not online and phase == "ready":
-        scanner = "Scanner offline"
+        scanner = tr("scanner_off")
     elif phase == "ready":
-        scanner = "Ready  /  paper loaded" if loaded else "Ready  /  load paper"
+        scanner = tr("ready_full" if loaded else "ready")
     elif waiting:
-        scanner = "Load next pass"
+        scanner = tr("load_next")
     elif phase == "scan":
-        scanner = "Scanning"
+        scanner = tr("scan")
         if progress.get("stage") == "captured":
-            side = progress["side"]
-            scanner = f"Scanning  /  sheet {(side+1)//2}, {'front' if side%2 else 'back'}"
+            side = progress.get("captured", progress["side"])
+            scanner = tr("sheet", n=(side+1)//2, side=tr("front" if side%2 else "back"))
     else:
-        scanner = "Finalizing" if phase == "finalizing" else "Scanner busy"
+        scanner = tr("final" if phase == "finalizing" else "busy")
 
     jobs = state.get("jobs", [])
     deliveries = state.get("deliveries", [])
@@ -44,34 +57,34 @@ def view(state, now):
         item = job.get("progress") or {}
         if job["state"] == "processing":
             stage = item.get("stage") or item.get("event")
-            label = STAGES.get(stage, "Processing")
+            label = tr(stage if stage in ("crop","filter","check_text","orient","clean","name",
+                                         "verify_reference","reference","assemble") else "process")
             if item.get("side"):
-                label += f"  /  side {item['side']} of {item['total_sides']}"
+                label += "  /  " + tr("side_count", n=item["side"], t=item["total_sides"])
             elif item.get("total_documents"):
-                label += f"  /  PDF {item['document']} of {item['total_documents']}"
+                label += "  /  " + tr("pdf_count", n=item["document"], t=item["total_documents"])
             lines.append(label)
     queued = sum(j["state"] == "queued" for j in jobs)
     if queued:
-        lines.append(f"{queued} batch{'es' if queued != 1 else ''} queued")
-    for status, label in DELIVERY.items():
+        lines.append(tr("queued_batches", n=queued))
+    for status in ("failed","uncertain","queued","sending","consuming","verifying"):
         count = sum(d["state"] == status for d in deliveries)
         if count:
-            lines.append(f"{label}  /  {count} PDF" + ("s" if count != 1 else ""))
+            lines.append(f"{tr(status)}  /  {count} PDF")
     if any(j["state"] == "failed" for j in jobs):
-        lines.append("Processing failed  /  check job")
+        lines.append(tr("proc_error"))
     if (state.get("last") or {}).get("event") == "error":
-        lines.append("Scan failed  /  check feeder")
-    recent = [d for d in deliveries if d["state"] == "delivered" and now-d.get("updated",0) < 30]
-    if recent:
-        lines.append("Paperless received  /  Inbox verified")
+        lines.append(tr("scan_error"))
+    if any(d["state"] == "delivered" and now-d.get("updated",0) < 30 for d in deliveries):
+        lines.append(tr("delivered"))
     if not lines:
         if any(j["state"] == "completed" and now-j["updated"] < 20 for j in jobs):
-            lines.append("PDF ready")
+            lines.append(tr("pdf_ready"))
         else:
-            lines.append("Acquiring originals" if phase == "scan" else "No pending tasks")
+            lines.append(tr("acquire" if phase == "scan" else "idle"))
     return dict(mode=state["mode"], scanner=scanner, task=lines[int(now//3) % len(lines)],
                 select=phase=="ready", scan=online and loaded is True and (phase=="ready" or waiting),
-                waiting=waiting)
+                waiting=waiting, online=online)
 
 
 async def request(payload):
@@ -85,10 +98,12 @@ async def request(payload):
 
 
 async def main():
+    lang = language()
+    meter = Workload()
     bridge, native = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     bridge.setblocking(False)
     proc = await asyncio.create_subprocess_exec("/usr/local/lib/scanstation/kiosk",
-                    str(native.fileno()), pass_fds=(native.fileno(),))
+                    str(native.fileno()), lang, pass_fds=(native.fileno(),))
     native.close()
     loop = asyncio.get_running_loop()
     command = None
@@ -108,16 +123,19 @@ async def main():
             try:
                 reply = await asyncio.wait_for(request(payload), 8)
                 if "error" in reply:
-                    notice, until = reply["error"], time.time()+6
+                    notice = message(lang, "empty" if reply["error"] == "Feeder is empty." else "rejected")
+                    until = time.time()+6
                     reply = await asyncio.wait_for(request({"action":"status"}), 8)
-                model = view(reply, time.time())
+                model = view(reply, time.time(), lang)
+                percent = meter.measure(reply, time.time())
             except (OSError, ValueError, TimeoutError, KeyError):
-                model = dict(mode="", scanner="Controller offline", task="Reconnecting",
+                percent = -1
+                model = dict(mode="", scanner=message(lang,"offline"), task=message(lang,"retry"), online=False,
                              select=False, scan=False, waiting=False)
             if time.time() < until:
                 model["task"] = notice
             parts = (ack, model["mode"], int(model["select"]), int(model["scan"]),
-                     int(model["waiting"]), model["scanner"], model["task"])
+                     int(model["waiting"]), model["scanner"], model["task"], percent, int(model["online"]))
             packet = "\t".join(str(v).replace("\t"," ").replace("\n"," ") for v in parts).encode()
             if packet != previous:
                 await loop.sock_sendall(bridge, packet)
@@ -141,4 +159,12 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Own the virtual terminal in graphics mode for the entire UI lifetime.
+    # setterm alone can be undone when systemd resets the TTY between processes.
+    prior = bytearray(4)
+    fcntl.ioctl(0, 0x4B3B, prior)  # KDGETMODE
+    fcntl.ioctl(0, 0x4B3A, 1)      # KDSETMODE / KD_GRAPHICS
+    try:
+        asyncio.run(main())
+    finally:
+        fcntl.ioctl(0, 0x4B3A, struct.unpack("i", prior)[0])
