@@ -92,6 +92,7 @@ def verify(directory, args):
     actual = []
     for n in range(1, 5):
         name = directory / f"page-{n:03}.pnm"
+        event(args, "progress", stage="verify_reference", number=n, total=4)
         with Image.open(name) as im:
             paper, _, _ = paper_area(im)
             blank, bright, peak = inspect_page(paper, back=n % 2 == 0)
@@ -401,7 +402,8 @@ def read_lines(image):
     image.convert("L").save(stream, format="PPM")
     proc = subprocess.run(["tesseract", "stdin", "stdout", "--dpi", "250", "-l", "fra+eng",
                            "--psm", "11", "tsv"], input=stream.getvalue(),
-                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45)
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45,
+                          env={**os.environ, "OMP_THREAD_LIMIT": "1"})
     if proc.returncode:
         raise ValueError("Text preview failed. Check the French and English Tesseract data.")
     lines = {}
@@ -416,7 +418,10 @@ def read_lines(image):
 def header_lines(im):
     header = im.crop((0, 0, im.width, min(im.height, max(500, int(im.height*.34)), 1450)))
     header.thumbnail((1800, 1450))
-    return read_lines(ImageOps.autocontrast(header.convert("L"), cutoff=(0, 1)))
+    try:
+        return read_lines(ImageOps.autocontrast(header.convert("L"), cutoff=(0, 1)))
+    except (ValueError, subprocess.TimeoutExpired):
+        return []
 
 
 def readability(lines):
@@ -441,7 +446,23 @@ def document_name(lines, receipt, fallback):
         if safe:
             candidates.append(safe)
     title = candidates[0] if candidates else fallback
+    if not receipt:
+        for candidate in candidates:
+            if re.fullmatch(r"(?:devis|facture|invitation|attestation|invoice|quotation)", candidate, re.I):
+                if candidate.casefold() != title.casefold():
+                    title = f"{candidate.title()} - {title}"
+                break
+            if len(title.split()) == 1 and candidate.isupper() and len(candidate.split()) >= 2:
+                title = candidate
+                break
     dates = set()
+    months = "janvier février mars avril mai juin juillet août septembre octobre novembre décembre".split()
+    for day, month, year in re.findall(r"\b(\d{1,2})\s+(" + "|".join(months) +
+                                       r")\s+(20\d\d)\b", " ".join(text).lower()):
+        try:
+            dates.add(date(int(year), months.index(month)+1, int(day)))
+        except ValueError:
+            continue
     for d, m, y in re.findall(r"\b(\d{1,2})[/.\-](\d{1,2})[/.\-](20\d\d)\b", " ".join(text)):
         try:
             dates.add(date(int(y), int(m), int(d)))
@@ -455,8 +476,15 @@ def blank_has_text(im):
     # Recognition is a veto only. A missing OCR result cannot erase artwork.
     preview = im.convert("L")
     preview.thumbnail((1500, 1900))
+    ink = ImageChops.subtract(preview.filter(ImageFilter.MaxFilter(5)), preview)
+    mask = ink.point(lambda v: 0 if v >= 36 else 255)
+    if mask.histogram()[0] < 12:
+        return False
     for angle in (0, 180):
-        lines = read_lines(preview.rotate(angle))
+        try:
+            lines = read_lines(mask.rotate(angle))
+        except (ValueError, subprocess.TimeoutExpired):
+            return True
         if any(sum(len(w) for w, c in line if c >= 85 and w.isalpha()) >= 5 for line in lines):
             return True
     return False
@@ -479,7 +507,7 @@ def run(args):
             args.device = scanner_device(args.device)
     args.output.mkdir(parents=True, exist_ok=True)
     job = Path(tempfile.mkdtemp(prefix="scan-", dir=args.output)).resolve()
-    event(args, "job", directory=str(job))
+    event(args, "job", directory=str(job), mode=args.mode, profile=args.profile)
     pending = job / "pdf-pending"
     pending.mkdir()
     groups = []
@@ -506,7 +534,8 @@ def run(args):
             if index % 2 == 0:
                 front_angle = 0
             position = dict(pass_number=pass_no, side=index+1, total_sides=len(originals),
-                            document=len(groups), total_documents=None)
+                            document=len(groups), sheet=index//2+1, total_sheets=len(originals)//2,
+                            total_documents=None if args.mode == "sheet" else 1)
             event(args, "progress", stage="crop", **position)
             correction = {}
             lines = None
