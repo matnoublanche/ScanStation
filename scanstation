@@ -121,7 +121,7 @@ def acquire(dest, device, args, pass_no):
                           env={**os.environ, "LC_ALL": "C"}) as result:
         for line in result.stderr:
             print(line, end="", file=sys.stderr, flush=True)
-            match = re.match(r"Scanned page (\d+) ", line)
+            match = re.match(r"Scanned page (\d+)\b", line)
             if match:
                 event(args, "progress", stage="captured", pass_number=pass_no,
                       side=int(match[1]), total_sides=None)
