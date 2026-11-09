@@ -5,3 +5,4 @@ quality = 76
 profile = "document"  # document or receipt
 # Optional four-image reference set, checked before filtering.
 # reference = "~/scanstation-test/duplex"
+auto_name = true

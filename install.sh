@@ -21,7 +21,7 @@ as_root() {
     if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
 }
 if [ ! -r /etc/debian_version ]; then echo 'Debian 13 required.' >&2; exit 1; fi
-as_root apt-get install -y python3 python3-numpy python3-pil python3-sane libleptonica6 sane-utils img2pdf tesseract-ocr tesseract-ocr-osd
+as_root apt-get install -y python3 python3-numpy python3-pil python3-sane libleptonica6 sane-utils img2pdf tesseract-ocr tesseract-ocr-osd tesseract-ocr-fra tesseract-ocr-eng
 /usr/bin/python3 "$src/scanstation" --version
 confdir=${XDG_CONFIG_HOME:-"$HOME/.config"}/scanstation
 mkdir -p "$confdir"

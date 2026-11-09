@@ -68,3 +68,11 @@ Pass `--json` to a direct scan for UTF-8 newline-delimited JSON on stdout. Read 
 ## Upgrading from 0.3
 
 Version 0.4 uses English commands, options, JSON fields, events and report keys. Update external clients together with the Pi. The installer replaces the previous button service. Existing configuration keys and saved mode names are read automatically. The output location configured on an existing installation is preserved. Historical reports retain their original keys.
+
+## Names and progress (0.5)
+
+With `auto_name = true` (default), ScanStation reads the header of the first retained page of each PDF. It selects a confident heading, uses a unique unambiguous numeric date from that header when available, and otherwise uses the local job date. A missing heading falls back to Scan. Duplicate filenames within a job get numeric suffixes. Set `--no-auto-name` for numbered filenames. This preview does not create an OCR layer. Receipt orientation can compare header readability in both directions when orientation detection is inconclusive.
+
+For near-blank candidates with local contrast, confident text can veto removal. Graphics and codes still have independent image-based protection. Missing text alone never makes a side blank.
+
+A `progress` event exposes the current stage (`captured`, `crop`, `filter`, `check_text`, `orient`, `clean`, `name`, `assemble`). Side numbers are per pass. An unknown total is null while feeding; the final PDF count is known during assembly. The controller exposes the latest event through `status --json`. The `completed` event means local PDFs are ready. Paperless delivery is a subsequent integration.

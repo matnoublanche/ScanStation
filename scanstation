@@ -1,5 +1,8 @@
 #!/usr/bin/python3
 """ScanStation engine for the S1300i, 300 dpi color duplex ADF."""
+import csv
+import io
+from datetime import date
 import tomllib
 import fcntl
 import ctypes
@@ -16,7 +19,7 @@ from pathlib import Path
 import numpy as np
 from PIL import ImageOps, Image, ImageChops, ImageFilter
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 
@@ -92,6 +95,8 @@ def verify(directory, args):
         with Image.open(name) as im:
             paper, _, _ = paper_area(im)
             blank, bright, peak = inspect_page(paper, back=n % 2 == 0)
+            if blank and peak >= 45 and blank_has_text(paper):
+                blank = False
         actual.append(blank)
         event(args, "reference", file=name.name, kept=not blank, bright_fraction=bright, contrast=peak)
     if actual != expected:
@@ -108,10 +113,18 @@ def pages(directory):
     return [p for _, p in found]
 
 
-def acquire(dest, device):
-    result = subprocess.run(["scanimage", "-d", device, "--source", "ADF Duplex",
-                             "--mode", "Color", "--resolution", "300", "--page-height", "0", "--format=pnm",
-                             "--batch=page-%06d.pnm"], cwd=dest)
+def acquire(dest, device, args, pass_no):
+    cmd = ["scanimage", "-d", device, "--source", "ADF Duplex", "--mode", "Color",
+           "--resolution", "300", "--page-height", "0", "--format=pnm", "--batch=page-%06d.pnm"]
+    with subprocess.Popen(cmd, cwd=dest, stderr=subprocess.PIPE, text=True,
+                          env={**os.environ, "LC_ALL": "C"}) as result:
+        for line in result.stderr:
+            print(line, end="", file=sys.stderr, flush=True)
+            match = re.match(r"Scanned page (\d+) ", line)
+            if match:
+                event(args, "progress", stage="captured", pass_number=pass_no,
+                      side=int(match[1]), total_sides=None)
+        result.wait()
     # SANE_STATUS_NO_DOCS (7) is expected at the end of the feeder.
     if result.returncode not in (0, 7):
         raise ValueError(f"Capture interrupted (scanimage {result.returncode}).")
@@ -382,6 +395,73 @@ def mirrored_receipt(front, back):
     return evidence.max() < 40 and patch_mean.max() < 20
 
 
+def read_lines(image):
+    """Read a preview into confident word groups. Never add an OCR layer."""
+    stream = io.BytesIO()
+    image.convert("L").save(stream, format="PPM")
+    proc = subprocess.run(["tesseract", "stdin", "stdout", "--dpi", "250", "-l", "fra+eng",
+                           "--psm", "11", "tsv"], input=stream.getvalue(),
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45)
+    if proc.returncode:
+        raise ValueError("Text preview failed. Check the French and English Tesseract data.")
+    lines = {}
+    for row in csv.DictReader(io.StringIO(proc.stdout.decode()), delimiter="\t", quoting=csv.QUOTE_NONE):
+        word = (row.get("text") or "").strip()
+        if row["level"] == "5" and word and float(row["conf"]) >= 55:
+            key = tuple(row[k] for k in ("block_num", "par_num", "line_num"))
+            lines.setdefault(key, []).append((word, float(row["conf"])))
+    return list(lines.values())
+
+
+def header_lines(im):
+    header = im.crop((0, 0, im.width, min(im.height, max(500, int(im.height*.34)), 1450)))
+    header.thumbnail((1800, 1450))
+    return read_lines(ImageOps.autocontrast(header.convert("L"), cutoff=(0, 1)))
+
+
+def readability(lines):
+    return sum(min(len(word), 12) for line in lines for word, confidence in line
+               if confidence >= 75 and sum(c.isalpha() for c in word) >= 2)
+
+
+def document_name(lines, receipt, fallback):
+    text = [" ".join(word for word, conf in line) for line in lines]
+    candidates = []
+    for line, words in zip(text, lines):
+        if len(line) > 85 or not 1 <= len(words) <= 10:
+            continue
+        if sum(c.isalpha() for c in line) < 4 or sum(c.isdigit() for c in line) > 2:
+            continue
+        if np.mean([conf for _, conf in words]) < 80:
+            continue
+        if re.search(r"@|https?://|\b(?:rue|avenue|tél|tel|siret|siren|tva|cedex|www)\b", line, re.I):
+            continue
+        safe = re.sub(r"[^\w -]+", " ", line, flags=re.UNICODE)
+        safe = " ".join(safe.split())[:64].strip(" -_")
+        if safe:
+            candidates.append(safe)
+    title = candidates[0] if candidates else fallback
+    dates = set()
+    for d, m, y in re.findall(r"\b(\d{1,2})[/.\-](\d{1,2})[/.\-](20\d\d)\b", " ".join(text)):
+        try:
+            dates.add(date(int(y), int(m), int(d)))
+        except ValueError:
+            continue
+    stamp = dates.pop() if len(dates) == 1 else date.today()
+    return f"{stamp.isoformat()} - {'Receipt - ' if receipt else ''}{title}"
+
+
+def blank_has_text(im):
+    # Recognition is a veto only. A missing OCR result cannot erase artwork.
+    preview = im.convert("L")
+    preview.thumbnail((1500, 1900))
+    for angle in (0, 180):
+        lines = read_lines(preview.rotate(angle))
+        if any(sum(len(w) for w, c in line if c >= 85 and w.isalpha()) >= 5 for line in lines):
+            return True
+    return False
+
+
 def run(args):
     if args.mode == "verify" and not args.reference:
         raise ValueError("Set --reference to the reference image directory.")
@@ -403,6 +483,8 @@ def run(args):
     pending = job / "pdf-pending"
     pending.mkdir()
     groups = []
+    titles = {}
+    final_names = []
     report = []
     pass_no = 0
     while True:
@@ -415,7 +497,7 @@ def run(args):
             for p in pages(args.replay[pass_no - 1]):
                 originals.append(Path(shutil.copy2(p, folder / p.name)))
         else:
-            originals = acquire(folder, args.device)
+            originals = acquire(folder, args.device, args, pass_no)
             if pass_no == 1 and args.reference and args.filter:
                 verify(args.reference, args)
         for index, p in enumerate(originals):
@@ -423,11 +505,16 @@ def run(args):
                 groups.append([])
             if index % 2 == 0:
                 front_angle = 0
+            position = dict(pass_number=pass_no, side=index+1, total_sides=len(originals),
+                            document=len(groups), total_documents=None)
+            event(args, "progress", stage="crop", **position)
             correction = {}
+            lines = None
             with Image.open(p) as im:
                 receipt = args.profile == "receipt"
                 aligned, skew, cuts = receipt_area(im) if receipt else paper_area(im)
                 correction["vertical_trim_px"] = cuts
+                event(args, "progress", stage="filter", **position)
                 blank, bright, peak = inspect_page(aligned, back=index % 2 == 1)
                 if receipt:
                     marks = receipt_marks(aligned)
@@ -438,8 +525,14 @@ def run(args):
                     if index % 2 and mirrored_receipt(front_marks, marks):
                         blank = True
                         correction["reason"] = "front-side show-through"
+                if args.filter and blank and "reason" not in correction and peak >= 45:
+                    event(args, "progress", stage="check_text", **position)
+                    if blank_has_text(aligned):
+                        blank = False
+                        correction["reason"] = "readable text"
                 kept = not (args.filter and blank)
                 if kept:
+                    event(args, "progress", stage="orient", **position)
                     jpg = p.with_suffix(".jpg")
                     if receipt:
                         with tempfile.TemporaryDirectory(dir=folder) as tmp:
@@ -457,10 +550,19 @@ def run(args):
                                         angle, source = first, "cross-checked"
                     else:
                         angle, source = orientation(p, front_angle)
+                    if receipt and source == "fallback":
+                        alternatives = [(a, header_lines(aligned.rotate(-a, expand=True)))
+                                        for a in (angle, (angle+180) % 360)]
+                        alternatives.sort(key=lambda pair: readability(pair[1]), reverse=True)
+                        best, other = alternatives
+                        if readability(best[1]) >= max(18, readability(other[1])*1.5):
+                            angle, lines = best
+                            source = "header readability"
                     if index % 2 == 0:
                         front_angle = angle
                     correction.update(clockwise_rotation=angle, orientation=source, skew_degrees=skew)
                     upright = aligned.rotate(-angle, expand=True)
+                    event(args, "progress", stage="clean", **position)
                     if receipt:
                         cleaned = ImageOps.autocontrast(upright.convert("L"), cutoff=(0, 1))
                         fraction = 0.0
@@ -469,6 +571,11 @@ def run(args):
                     correction.update(image_mode=cleaned.mode, color_fraction=fraction)
                     dpi = 300 if receipt else 200
                     cleaned.save(jpg, quality=args.quality, optimize=True, dpi=(dpi, dpi))
+                    if args.auto_name and not groups[-1]:
+                        event(args, "progress", stage="name", **position)
+                        if lines is None:
+                            lines = header_lines(upright)
+                        titles[len(groups)] = document_name(lines, receipt, "Scan")
                     groups[-1].append(jpg)
             event(args, "side", pass_number=pass_no, number=index+1, kept=kept)
             report.append(dict(original=str(p.relative_to(job)), pdf=len(groups),
@@ -492,12 +599,24 @@ def run(args):
             if reply.strip().lower() in ("f", "finish"):
                 break
     (job / "pages.json").write_text(json.dumps(report, indent=2), encoding="utf8")
+    used = set()
+    total = sum(bool(g) for g in groups)
     for n, group in enumerate(groups, 1):
         if group:
-            subprocess.run(["img2pdf", "-o", str(pending / f"document-{n:03}.pdf"),
+            stem = titles.get(n, f"document-{n:03}")
+            name = stem + ".pdf"
+            suffix = 1
+            while name.casefold() in used:
+                suffix += 1
+                name = f"{stem} ({suffix}).pdf"
+            used.add(name.casefold())
+            final_names.append(name)
+            event(args, "progress", stage="assemble", document=len(final_names),
+                  total_documents=total, filename=name)
+            subprocess.run(["img2pdf", "-o", str(pending / name),
                             *map(str, group)], check=True)
     pending.rename(job / "pdf")
-    event(args, "completed", pdf=[str(p) for p in sorted((job / "pdf").glob("*.pdf"))],
+    event(args, "completed", pdf=[str(job / "pdf" / name) for name in final_names],
           report=str(job / "pages.json"), sides=len(report), kept_count=sum(r["kept"] for r in report))
 
 
@@ -515,11 +634,12 @@ def main():
     parser.add_argument("--reference", type=Path, help="optional four-image reference directory")
     parser.add_argument("--filter", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--auto-name", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--quality", type=int, help="JPEG quality from 1 to 95")
     parser.add_argument("--json", action="store_true", help="one JSON event per line")
     args = parser.parse_args()
     try:
-        defaults = dict(device=os.getenv("SCANSTATION_DEVICE") or "auto", filter=True,
+        defaults = dict(device=os.getenv("SCANSTATION_DEVICE") or "auto", filter=True, auto_name=True,
                         output="~/scanstation-jobs", quality=76, reference="", profile="document")
         if args.config.exists() or args.config != CONFIG:
             with args.config.open("rb") as conf:
