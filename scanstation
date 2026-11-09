@@ -19,12 +19,18 @@ from pathlib import Path
 import numpy as np
 from PIL import ImageOps, Image, ImageChops, ImageFilter
 
-VERSION = "0.5.3"
+sys.path.append("/usr/local/lib/scanstation")
+from jobqueue import Queue, STATE
+import time
+
+VERSION = "0.6.0"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 
 def event(args, name, **fields):
-    if args.json:
+    if getattr(args, "record", None):
+        args.record({"event": name, **fields})
+    elif args.json:
         print(json.dumps({"event": name, **fields}, ensure_ascii=False), flush=True)
     else:
         print(name, *fields.values(), flush=True)
@@ -577,13 +583,15 @@ def blank_has_text(im):
     return False
 
 
-def run(args):
-    if args.mode == "verify" and not args.reference:
-        raise ValueError("Set --reference to the reference image directory.")
-    if args.reference and (args.mode == "verify" or (args.replay and args.filter)):
-        verify(args.reference, args)
-    if args.mode == "verify":
-        return
+def sync_path(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def capture(args):
     if args.mode != "multipass" and len(args.replay) > 1:
         raise ValueError("Multiple replay directories require multipass mode.")
     if not args.replay:
@@ -595,12 +603,6 @@ def run(args):
     args.output.mkdir(parents=True, exist_ok=True)
     job = Path(tempfile.mkdtemp(prefix="scan-", dir=args.output)).resolve()
     event(args, "job", directory=str(job), mode=args.mode, profile=args.profile)
-    pending = job / "pdf-pending"
-    pending.mkdir()
-    groups = []
-    titles = {}
-    final_names = []
-    report = []
     pass_no = 0
     while True:
         pass_no += 1
@@ -613,8 +615,54 @@ def run(args):
                 originals.append(Path(shutil.copy2(p, folder / p.name)))
         else:
             originals = acquire(folder, args.device, args, pass_no)
-            if pass_no == 1 and args.reference and args.filter:
-                verify(args.reference, args)
+        # Persist the input files before committing the queue entry.
+        for original in originals:
+            sync_path(original)
+        sync_path(folder)
+        if args.mode != "multipass":
+            break
+        if args.replay:
+            if pass_no == len(args.replay):
+                break
+        else:
+            event(args, "waiting", choices=["next", "finish"])
+            if args.json:
+                reply = input().strip().lower()
+                if reply not in ("next", "finish"):
+                    raise ValueError("Expected next or finish on stdin.")
+            else:
+                reply = input("Load more sheets and press Enter, or f to finish: ")
+                while reply.strip().lower() not in ("", "f"):
+                    reply = input("Enter to scan, f to finish: ")
+            if reply.strip().lower() in ("f", "finish"):
+                break
+    options = {k: getattr(args,k) for k in ("mode","profile","filter","quality","auto_name")}
+    options["reference"] = str(args.reference.resolve()) if args.reference else None
+    sync_path(job)
+    sync_path(job.parent)
+    Queue().submit(job, options)
+    event(args, "queued", job_id=job.name, directory=str(job))
+    return job
+
+
+def process(args, job):
+    manifest = job / "result.json"
+    if (job / "pdf").is_dir():
+        # A restart after publishing the PDFs only needs to acknowledge the job.
+        return json.loads(manifest.read_text())
+    if args.reference and args.filter:
+        verify(Path(args.reference), args)
+    pending = job / "pdf-pending"
+    if pending.exists():
+        shutil.rmtree(pending)
+    pending.mkdir()
+    groups = []
+    titles = {}
+    final_names = []
+    report = []
+    folders = sorted(job.glob("pass-*"), key=lambda f: int(f.name.split("-")[1]))
+    for pass_no, folder in enumerate(folders, 1):
+        originals = pages(folder)
         for index, p in enumerate(originals):
             if not groups or args.mode == "page" or (args.mode == "sheet" and index % 2 == 0):
                 groups.append([])
@@ -697,23 +745,6 @@ def run(args):
             report.append(dict(original=str(p.relative_to(job)), pdf=len(groups),
                                kept=kept, blank_candidate=blank,
                                bright_fraction=bright, local_contrast=peak, **correction))
-        if args.mode != "multipass":
-            break
-        if args.replay:
-            if pass_no == len(args.replay):
-                break
-        else:
-            event(args, "waiting", choices=["next", "finish"])
-            if args.json:
-                reply = input().strip().lower()
-                if reply not in ("next", "finish"):
-                    raise ValueError("Expected next or finish on stdin.")
-            else:
-                reply = input("Load more sheets and press Enter, or f to finish: ")
-                while reply.strip().lower() not in ("", "f"):
-                    reply = input("Enter to scan, f to finish: ")
-            if reply.strip().lower() in ("f", "finish"):
-                break
     (job / "pages.json").write_text(json.dumps(report, indent=2), encoding="utf8")
     used = set()
     total = sum(bool(g) for g in groups)
@@ -731,12 +762,39 @@ def run(args):
                   total_documents=total, filename=name)
             subprocess.run(["img2pdf", "-o", str(pending / name),
                             *map(str, group)], check=True)
+    result = dict(event="completed", pdf=[str(job / "pdf" / name) for name in final_names],
+                  report=str(job / "pages.json"), sides=len(report), kept_count=sum(r["kept"] for r in report))
+    manifest.write_text(json.dumps(result, ensure_ascii=False), encoding="utf8")
+    for path in [manifest, job / "pages.json", *pending.glob("*.pdf"), pending, job]:
+        sync_path(path)
     pending.rename(job / "pdf")
-    event(args, "completed", pdf=[str(job / "pdf" / name) for name in final_names],
-          report=str(job / "pages.json"), sides=len(report), kept_count=sum(r["kept"] for r in report))
+    sync_path(job)
+    return result
+
+
+def worker():
+    queue = Queue()
+    with (STATE / "processor.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        queue.recover()
+        while True:
+            row = queue.claim()
+            if row is None:
+                time.sleep(.25)
+                continue
+            args = argparse.Namespace(**json.loads(row["options"]))
+            args.record = lambda data: queue.record(row["id"], data)
+            try:
+                result = process(args, Path(row["directory"]))
+            except Exception as exc:
+                result = dict(event="error", message=str(exc), directory=row["directory"])
+            args.record(result)
 
 
 def main():
+    if sys.argv[1:] == ["--worker"]:
+        worker()
+        return 0
     actions = ("select", "start", "status", "next", "finish")
     if sys.argv[1:2] and sys.argv[1] in actions:
         os.execv(sys.executable, [sys.executable, "/usr/local/lib/scanstation/controller.py", *sys.argv[1:]])
@@ -752,6 +810,7 @@ def main():
     parser.add_argument("--output", type=Path)
     parser.add_argument("--auto-name", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--quality", type=int, help="JPEG quality from 1 to 95")
+    parser.add_argument("--enqueue", action="store_true", help="return once capture is durably queued")
     parser.add_argument("--json", action="store_true", help="one JSON event per line")
     args = parser.parse_args()
     try:
@@ -777,8 +836,13 @@ def main():
         args.reference = Path(args.reference).expanduser() if args.reference else None
         if not 1 <= args.quality <= 95:
             raise ValueError("JPEG quality must be between 1 and 95.")
-        if args.replay or args.mode == "verify":
-            run(args)
+        if args.mode == "verify":
+            if not args.reference:
+                raise ValueError("Set --reference to the reference image directory.")
+            verify(args.reference, args)
+            return 0
+        if args.replay:
+            job = capture(args)
         else:
             lockdir = Path(os.environ.get("XDG_STATE_HOME") or Path.home()/".local/state") / "scanstation"
             lockdir.mkdir(parents=True, exist_ok=True)
@@ -787,7 +851,9 @@ def main():
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     raise ValueError("A scan is already running for this user.") from None
-                run(args)
+                job = capture(args)
+        if not args.enqueue:
+            Queue().wait(job.name, lambda data: event(args, data["event"], **{k:v for k,v in data.items() if k!="event"}))
     except (ValueError, OSError, EOFError, KeyboardInterrupt, subprocess.SubprocessError) as exc:
         event(args, "error", message=str(exc) or "Operation interrupted")
         return 1

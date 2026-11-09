@@ -6,7 +6,7 @@ trap 'rm -rf "$tmp"' EXIT
 trap 'exit 1' HUP INT TERM
 if [ "$#" -eq 2 ]; then
     base="https://raw.githubusercontent.com/$1/$2"
-    for file in scanstation controller.py config.example.toml; do
+    for file in scanstation controller.py jobqueue.py config.example.toml; do
         curl -fsSL "$base/$file" -o "$tmp/$file"
     done
     src=$tmp
@@ -22,7 +22,7 @@ as_root() {
 }
 if [ ! -r /etc/debian_version ]; then echo 'Debian 13 required.' >&2; exit 1; fi
 as_root apt-get install -y python3 python3-numpy python3-pil python3-sane libleptonica6 sane-utils img2pdf tesseract-ocr tesseract-ocr-osd tesseract-ocr-fra tesseract-ocr-eng
-/usr/bin/python3 "$src/scanstation" --version
+PYTHONPATH="$src" /usr/bin/python3 "$src/scanstation" --version
 confdir=${XDG_CONFIG_HOME:-"$HOME/.config"}/scanstation
 mkdir -p "$confdir"
 if [ ! -e "$confdir/config.toml" ]; then
@@ -50,6 +50,25 @@ UMask=0077
 [Install]
 WantedBy=multi-user.target
 EOF
+cat > "$tmp/scanstation-worker.service" <<EOF
+[Unit]
+Description=ScanStation persistent PDF processing queue
+After=local-fs.target
+
+[Service]
+User=$account
+ExecStart=/usr/local/bin/scanstation --worker
+Restart=on-failure
+RestartSec=2
+Nice=5
+Environment=OMP_THREAD_LIMIT=1
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF
+as_root install -m 644 "$tmp/scanstation-worker.service" /etc/systemd/system/scanstation-worker.service
+as_root install -m 644 "$src/jobqueue.py" /usr/local/lib/scanstation/jobqueue.py
 as_root install -m 644 "$src/controller.py" /usr/local/lib/scanstation/controller.py
 as_root install -m 644 "$tmp/scanstation-button.service" /etc/systemd/system/scanstation-button.service
 target=$(as_root mktemp /usr/local/bin/.scanstation.XXXXXX)
@@ -63,5 +82,6 @@ if [ -f /etc/systemd/system/scanstation-bouton.service ]; then
     as_root rm -f /etc/systemd/system/scanstation-bouton.service
 fi
 as_root systemctl daemon-reload
-as_root systemctl enable scanstation-button.service
+as_root systemctl enable scanstation-worker.service scanstation-button.service
+as_root systemctl restart scanstation-worker.service
 as_root systemctl restart scanstation-button.service

@@ -10,6 +10,8 @@ import sys
 import tempfile
 import tomllib
 
+from jobqueue import Queue
+
 STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home()/".local/state") / "scanstation"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home()/".config") / "scanstation/config.toml"
 MODES = ("batch", "page", "sheet", "multipass", "receipt")
@@ -71,6 +73,7 @@ def remember(mode):
 
 class Controller:
     def __init__(self, sensors):
+        self.queue = Queue()
         self.sensors = sensors
         saved = STATE/"selection"
         self.mode = saved.read_text().strip() if saved.exists() else "batch"
@@ -89,8 +92,13 @@ class Controller:
 
     def status(self):
         phase = "busy" if self.phase == "ready" and running_job() else self.phase
-        return dict(mode=self.mode, status=phase, loaded=self.loaded,
-                    sensor_error=self.hardware_error, progress=self.progress, last=self.last)
+        jobs = self.queue.snapshot()
+        finished = [j for j in jobs if j["state"] in ("completed","failed")]
+        last = max(finished, key=lambda j:j["updated"])["progress"] if finished else None
+        if self.last and self.last.get("event") == "error":
+            last = self.last
+        return dict(mode=self.mode, status=phase, loaded=self.loaded, jobs=jobs,
+                    sensor_error=self.hardware_error, progress=self.progress, last=last)
 
     async def sample(self):
         try:
@@ -112,7 +120,7 @@ class Controller:
         mode = "batch" if self.mode == "receipt" else self.mode
         profile = "receipt" if self.mode == "receipt" else "document"
         self.proc = await asyncio.create_subprocess_exec(
-            ENGINE, mode, "--device", self.sensors.device_name, "--profile", profile, "--json", stdin=asyncio.subprocess.PIPE,
+            ENGINE, mode, "--device", self.sensors.device_name, "--profile", profile, "--json", "--enqueue", stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE)
         self.phase = "scan"
         self.progress = None
@@ -128,7 +136,7 @@ class Controller:
                     if item["event"] == "waiting":
                         self.phase = "waiting"
                         self.armed = False
-                    if item["event"] in ("completed", "error"):
+                    if item["event"] in ("queued", "error"):
                         result = item
         finally:
             rc = await proc.wait()

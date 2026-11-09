@@ -43,9 +43,9 @@ scanstation next
 scanstation finish
 ```
 
-A touchscreen can call `select MODE --start-if-loaded` with `page`, `sheet`, `batch`, `multipass` or `receipt`. An empty feeder saves the choice for later. With paper loaded, the command starts the job immediately. Plain `select MODE` only saves the choice. Pressing the hardware button or running `start` uses the saved mode. The initial selection is batch. During a multipass wait, reload the feeder and press the button or use `next`. Use `finish` to assemble the PDF. The service ignores a second start while busy. Press and release the scanner button; epjitsu refreshes sensor status roughly once per second.
+A touchscreen can call `select MODE --start-if-loaded` with `page`, `sheet`, `batch`, `multipass` or `receipt`. An empty feeder saves the choice for later. With paper loaded, the command starts the job immediately. Plain `select MODE` only saves the choice. Pressing the hardware button or running `start` uses the saved mode. The initial selection is batch. During a multipass wait, reload the feeder and press the button or use `next`. Use `finish` to assemble the PDF. The service accepts the next start as soon as capture has been queued. Press and release the scanner button; epjitsu refreshes sensor status roughly once per second.
 
-Controller commands return a snapshot. Poll `status --json` for progress. Its fields include `mode`, `status` (ready, scan, waiting, finalizing or busy), `loaded` (null when unavailable), `sensor_error`, `progress` and `last`. Selection survives service restarts. The last result stays in memory until the next result or restart. Direct SSH scanning is synchronous and does not change the selected mode.
+Controller commands return a snapshot. Poll `status --json` for progress. Its fields include `mode`, `status` (ready, scan, waiting, finalizing or busy), `loaded` (null when unavailable), `sensor_error`, `progress` and `last`. Selection survives service restarts. Completed processing results survive service restarts. Direct SSH scanning is synchronous and does not change the selected mode.
 
 ## Configuration
 
@@ -76,8 +76,30 @@ With `auto_name = true` (default), ScanStation reads the header of the first ret
 
 For near-blank candidates with local contrast, confident text can veto removal. Graphics and codes still have independent image-based protection. Missing text alone never makes a side blank.
 
-A `progress` event exposes the current stage (`verify_reference`, `captured`, `crop`, `filter`, `check_text`, `orient`, `clean`, `name`, `assemble`). Side numbers are per pass. An unknown total is null while feeding; the final PDF count is known during assembly. The controller exposes the latest event through `status --json`. The `completed` event means local PDFs are ready. Paperless delivery is a subsequent integration.
+A `progress` event exposes the current stage (`verify_reference`, `captured`, `crop`, `filter`, `check_text`, `orient`, `clean`, `name`, `assemble`). Side numbers are per pass. An unknown total is null while feeding; the final PDF count is known during assembly. The controller exposes each processing job through `jobs` in `status --json`. The `completed` event means local PDFs are ready. Paperless delivery is a subsequent integration.
 
 For a bright back with a narrow, continuous crease, the blank filter follows the
 slope of the crease before testing for text. Readable text keeps the side.
 Independent high-contrast marks, including small codes, can also keep it.
+
+## Persistent processing queue (0.6)
+
+The capture process holds the scanner for one feeder load (all requested passes
+in multipass mode). It syncs the originals and commits the job and its scan
+settings to SQLite before releasing the device. When status is ready, load the
+next batch and press Scan, even while the previous batch is doing OCR.
+Every batch has its own job ID, originals, page report and published PDF directory.
+
+The separate systemd service `scanstation-worker.service` processes one job at a time,
+in capture-completion order. Stopping or restarting it leaves queued work on disk.
+An interrupted processing job starts again from its saved originals; already
+published PDFs are acknowledged without publishing a second set. A capture
+interrupted before handoff leaves its originals for inspection and is not processed
+as a complete batch. Processing failures are recorded and later jobs continue.
+Replay retained pass directories to retry a failed job.
+
+`scanstation status --json` reports scanner availability separately from `jobs`.
+Each entry includes its ID, state, timestamp and latest event. All outstanding jobs
+and the last eight finished jobs are shown. The database is in
+`~/.local/state/scanstation/jobs.sqlite3`. Direct CLI scans wait for their own result
+by default; add `--enqueue` to return the job ID immediately after capture.
