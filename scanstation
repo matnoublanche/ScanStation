@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 from PIL import ImageOps, Image, ImageChops, ImageFilter
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 
@@ -46,18 +46,33 @@ def fold_traces_only(contrast):
         rows = np.flatnonzero((values > 84).any(axis=1))
         if not rows.size:
             continue
-        groups = np.split(rows, np.flatnonzero(np.diff(rows) > 1) + 1)
+        # A slightly slanted crease has peaks on different, sometimes
+        # nonadjacent rows. Trace the ridge before measuring its thickness.
+        drift = max(4, round(values.shape[1]*.025))
+        groups = np.split(rows, np.flatnonzero(np.diff(rows) > drift) + 1)
         if len(groups) > 4:
             continue
         for group in groups:
-            if len(group) > 4:
+            if group[-1]-group[0] > drift:
                 break
-            strip = values[max(0, group[0]-3):group[-1]+4]
-            # An isolated mark, QR code or text does not span the page
-            # continuously within such a thin band.
-            if (strip.max(axis=0) > 30).mean() < .85:
+            lo = max(0, group[0]-drift)
+            strip = values[lo:group[-1]+drift+1]
+            x = np.arange(strip.shape[1])
+            ridge = strip.argmax(axis=0)
+            visible = strip[ridge, x] > 30
+            if visible.mean() < .85:
                 break
-            if np.quantile((strip > 45).sum(axis=0), .9) > 4:
+            # Median tile positions reject isolated peaks from paper texture.
+            tiles = np.array_split(x, min(24, len(x)))
+            anchors = [tile[visible[tile]] for tile in tiles if visible[tile].mean() >= .6]
+            if len(anchors) < 3:
+                break
+            slope, offset = np.polyfit([np.median(t) for t in anchors],
+                                       [np.median(ridge[t]) for t in anchors], 1)
+            distance = abs(np.arange(len(strip))[:, None] - (slope*x + offset))
+            if (abs(slope) > .025 or ((distance <= 3) & (strip > 30)).any(axis=0).mean() < .85
+                    or ((distance > 3) & (strip > 84)).any()
+                    or np.quantile((strip > 45).sum(axis=0), .9) > 4):
                 break
         else:
             return True

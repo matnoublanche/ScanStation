@@ -77,3 +77,7 @@ With `auto_name = true` (default), ScanStation reads the header of the first ret
 For near-blank candidates with local contrast, confident text can veto removal. Graphics and codes still have independent image-based protection. Missing text alone never makes a side blank.
 
 A `progress` event exposes the current stage (`verify_reference`, `captured`, `crop`, `filter`, `check_text`, `orient`, `clean`, `name`, `assemble`). Side numbers are per pass. An unknown total is null while feeding; the final PDF count is known during assembly. The controller exposes the latest event through `status --json`. The `completed` event means local PDFs are ready. Paperless delivery is a subsequent integration.
+
+For a bright back with a narrow, continuous crease, the blank filter follows the
+slope of the crease before testing for text. Readable text keeps the side.
+Independent high-contrast marks, including small codes, can also keep it.

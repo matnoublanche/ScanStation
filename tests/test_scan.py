@@ -39,3 +39,14 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(clean.getpixel((12, 410)), (255,)*3)
         self.assertEqual(clean.getpixel((70, 106)), (20,)*3)
         self.assertEqual(clean.getpixel((200, 257)), (148,)*3)
+
+    def test_slanted_fold_and_independent_mark(self):
+        import numpy as np
+        a = np.zeros((400, 760), dtype=np.uint8)
+        x = np.arange(760)
+        y = 200 + x//120
+        a[y, x] = 55
+        a[y[::100], x[::100]] = 90
+        self.assertTrue(engine["fold_traces_only"](a))
+        a[196:201, 450:455] = 105
+        self.assertFalse(engine["fold_traces_only"](a))
