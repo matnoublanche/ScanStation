@@ -103,3 +103,28 @@ Each entry includes its ID, state, timestamp and latest event. All outstanding j
 and the last eight finished jobs are shown. The database is in
 `~/.local/state/scanstation/jobs.sqlite3`. Direct CLI scans wait for their own result
 by default; add `--enqueue` to return the job ID immediately after capture.
+
+## Paperless delivery (0.7)
+
+Set `paperless_url` to the HTTPS base URL in config.toml. Put the API token in
+`paperless_token_file` (default: paperless.token next to the default config,
+readable only by the scanning user). Set `paperless_inbox_tag` to an existing tag,
+default `inbox`. Keep the URL empty for local-only scans. Options are captured per
+job; setting a URL affects future scans and replays. Use `--paperless-url ''`
+for a local-only replay. Previously completed jobs are not imported retroactively.
+
+The processing worker atomically queues each final PDF when it records local
+completion. A separate systemd service sends the PDF, saves the returned
+Paperless task UUID, waits for consumption and checks the imported document's tags.
+For an inbox-designated tag, Paperless gets the opportunity to assign it by default.
+Otherwise ScanStation includes its ID at upload. If the final document lacks the
+tag, ScanStation requests an additive tag update and verifies it. The submitted
+title is the PDF filename stem. Paperless performs archive OCR.
+
+`scanstation status --json` includes `deliveries`, with local file, job ID,
+state, task UUID, document ID, tag ID and error. Only `delivered` confirms the
+import and tag. Transient read failures and throttling back off. An ambiguous
+upload response or a restart during the POST leaves an `uncertain` entry to avoid
+silently posting twice. Inspect Paperless before issuing `scanstation retry-upload ID`.
+A failed consumption already carrying a task UUID is rechecked, never reposted
+by this command. Local originals and PDFs remain available.

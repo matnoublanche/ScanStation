@@ -6,7 +6,7 @@ trap 'rm -rf "$tmp"' EXIT
 trap 'exit 1' HUP INT TERM
 if [ "$#" -eq 2 ]; then
     base="https://raw.githubusercontent.com/$1/$2"
-    for file in scanstation controller.py jobqueue.py config.example.toml; do
+    for file in scanstation controller.py jobqueue.py delivery.py config.example.toml; do
         curl -fsSL "$base/$file" -o "$tmp/$file"
     done
     src=$tmp
@@ -21,7 +21,7 @@ as_root() {
     if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
 }
 if [ ! -r /etc/debian_version ]; then echo 'Debian 13 required.' >&2; exit 1; fi
-as_root apt-get install -y python3 python3-numpy python3-pil python3-sane libleptonica6 sane-utils img2pdf tesseract-ocr tesseract-ocr-osd tesseract-ocr-fra tesseract-ocr-eng
+as_root apt-get install -y python3-requests python3 python3-numpy python3-pil python3-sane libleptonica6 sane-utils img2pdf tesseract-ocr tesseract-ocr-osd tesseract-ocr-fra tesseract-ocr-eng
 PYTHONPATH="$src" /usr/bin/python3 "$src/scanstation" --version
 confdir=${XDG_CONFIG_HOME:-"$HOME/.config"}/scanstation
 mkdir -p "$confdir"
@@ -67,6 +67,11 @@ UMask=0077
 [Install]
 WantedBy=multi-user.target
 EOF
+sed -e 's/ScanStation persistent PDF processing queue/ScanStation Paperless delivery queue/' \
+    -e 's@ExecStart=.*@ExecStart=/usr/bin/python3 /usr/local/lib/scanstation/delivery.py@' \
+    "$tmp/scanstation-worker.service" > "$tmp/scanstation-delivery.service"
+as_root install -m 644 "$tmp/scanstation-delivery.service" /etc/systemd/system/scanstation-delivery.service
+as_root install -m 644 "$src/delivery.py" /usr/local/lib/scanstation/delivery.py
 as_root install -m 644 "$tmp/scanstation-worker.service" /etc/systemd/system/scanstation-worker.service
 as_root install -m 644 "$src/jobqueue.py" /usr/local/lib/scanstation/jobqueue.py
 as_root install -m 644 "$src/controller.py" /usr/local/lib/scanstation/controller.py
@@ -82,6 +87,7 @@ if [ -f /etc/systemd/system/scanstation-bouton.service ]; then
     as_root rm -f /etc/systemd/system/scanstation-bouton.service
 fi
 as_root systemctl daemon-reload
-as_root systemctl enable scanstation-worker.service scanstation-button.service
+as_root systemctl enable scanstation-delivery.service scanstation-worker.service scanstation-button.service
+as_root systemctl restart scanstation-delivery.service
 as_root systemctl restart scanstation-worker.service
 as_root systemctl restart scanstation-button.service

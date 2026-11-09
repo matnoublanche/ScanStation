@@ -97,7 +97,7 @@ class Controller:
         last = max(finished, key=lambda j:j["updated"])["progress"] if finished else None
         if self.last and self.last.get("event") == "error":
             last = self.last
-        return dict(mode=self.mode, status=phase, loaded=self.loaded, jobs=jobs,
+        return dict(mode=self.mode, status=phase, loaded=self.loaded, jobs=jobs, deliveries=self.queue.delivery_status(),
                     sensor_error=self.hardware_error, progress=self.progress, last=last)
 
     async def sample(self):

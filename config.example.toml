@@ -6,3 +6,8 @@ profile = "document"  # document or receipt
 # Optional four-image reference set, checked before filtering.
 # reference = "~/scanstation-test/duplex"
 auto_name = true
+
+# Set the HTTPS base URL to enable delivery of newly submitted jobs.
+paperless_url = ""
+paperless_token_file = "~/.config/scanstation/paperless.token"
+paperless_inbox_tag = "inbox"

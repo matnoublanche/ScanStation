@@ -23,7 +23,7 @@ sys.path.append("/usr/local/lib/scanstation")
 from jobqueue import Queue, STATE
 import time
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 
@@ -637,6 +637,8 @@ def capture(args):
             if reply.strip().lower() in ("f", "finish"):
                 break
     options = {k: getattr(args,k) for k in ("mode","profile","filter","quality","auto_name")}
+    options.update(paperless_url=args.paperless_url, paperless_token_file=str(Path(args.paperless_token_file).expanduser().resolve()),
+                   paperless_inbox_tag=args.paperless_inbox_tag)
     options["reference"] = str(args.reference.resolve()) if args.reference else None
     sync_path(job)
     sync_path(job.parent)
@@ -795,6 +797,14 @@ def main():
     if sys.argv[1:] == ["--worker"]:
         worker()
         return 0
+    if sys.argv[1:2] == ["retry-upload"]:
+        parser = argparse.ArgumentParser(prog="scanstation retry-upload")
+        parser.add_argument("id", type=int)
+        try:
+            Queue().retry_delivery(parser.parse_args(sys.argv[2:]).id)
+        except ValueError as exc:
+            parser.error(str(exc))
+        return 0
     actions = ("select", "start", "status", "next", "finish")
     if sys.argv[1:2] and sys.argv[1] in actions:
         os.execv(sys.executable, [sys.executable, "/usr/local/lib/scanstation/controller.py", *sys.argv[1:]])
@@ -803,6 +813,9 @@ def main():
     parser.add_argument("mode", choices=["verify", "page", "sheet", "batch", "multipass"])
     parser.add_argument("--profile", choices=["document", "receipt"])
     parser.add_argument("--config", type=Path, default=CONFIG)
+    parser.add_argument("--paperless-url", help="Paperless HTTPS base URL; empty disables delivery")
+    parser.add_argument("--paperless-token-file", help="private file containing the API token")
+    parser.add_argument("--paperless-inbox-tag", help="tag name to verify after import")
     parser.add_argument("--device", help="SANE device name, or auto")
     parser.add_argument("--replay", action="append", type=Path, default=[], help="replay a directory of PNM sides")
     parser.add_argument("--reference", type=Path, help="optional four-image reference directory")
@@ -815,6 +828,7 @@ def main():
     args = parser.parse_args()
     try:
         defaults = dict(device=os.getenv("SCANSTATION_DEVICE") or "auto", filter=True, auto_name=True,
+                        paperless_url="", paperless_token_file=str(CONFIG.parent/"paperless.token"), paperless_inbox_tag="inbox",
                         output="~/scanstation-jobs", quality=76, reference="", profile="document")
         if args.config.exists() or args.config != CONFIG:
             with args.config.open("rb") as conf:
