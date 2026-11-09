@@ -1,0 +1,14 @@
+#!/bin/sh
+# Download a complete release tree before starting the system installer.
+install_scanstation() (
+    set -eu
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
+    curl -fsSL --retry 3 https://codeload.github.com/matnoublanche/ScanStation/tar.gz/refs/heads/main -o "$tmp/source.tar.gz"
+    mkdir "$tmp/source"
+    tar -xzf "$tmp/source.tar.gz" --strip-components=1 -C "$tmp/source"
+    sh "$tmp/source/install.sh"
+)
+
+install_scanstation
