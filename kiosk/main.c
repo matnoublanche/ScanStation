@@ -74,8 +74,8 @@ static void build(void) {
     const char *fr_titles[]={"Page","Lot","Multipassage","Ticket"};
     const char *fr_hints[]={"Un PDF par feuille","Un PDF pour la pile","Réunir plusieurs piles","Recto uniquement"};
     lv_obj_t *s=lv_screen_active();color(s,BG);
-    label(s,14,7,"ScanStation",&fonts[3],INK);
-    indicator=box(s,449,17,10,10,MUTED,5);
+    label(s,14,7,french?"ScanStation vers Paperless":"ScanStation to Paperless",&fonts[3],INK);
+    indicator=box(s,14,253,10,10,MUTED,5);
     for(int i=0;i<4;i++) {
         lv_obj_t *o=tiles[i]=box(s,12+232*(i%2),47+65*(i/2),224,58,CARD,8);
         lv_obj_set_style_border_width(o,1,0); lv_obj_set_style_border_color(o,lv_color_hex(LINE),0);
@@ -91,7 +91,7 @@ static void build(void) {
     finish=box(s,300,181,168,49,CARD,8);button(finish,"finish");
     lv_obj_center(label(finish,0,0,french?"Terminer le PDF":"Finish PDF",&fonts[2],INK));
     lv_obj_add_flag(finish,LV_OBJ_FLAG_HIDDEN);
-    scanner=label(s,14,244,french?"Connexion":"Connecting",&fonts[2],INK);
+    scanner=label(s,33,244,french?"Connexion":"Connecting",&fonts[2],INK);
     task=label(s,14,274,french?"Démarrage":"Starting controller",&fonts[1],MUTED);
     counter=label(s,396,274,"",&fonts[1],MINT);
     lv_obj_set_width(counter,70);lv_obj_set_style_text_align(counter,LV_TEXT_ALIGN_RIGHT,0);

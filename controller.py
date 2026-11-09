@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -47,6 +48,13 @@ class Sensors:
                 self.guard.close()
                 self.guard = None
 
+    def usb_present(self):
+        match = re.fullmatch(r"epjitsu:libusb:(\d+):(\d+)", self.device_name or "")
+        if match is None:
+            return True  # Other SANE transports report errors through the sensor read.
+        bus, address = match.groups()
+        return (Path("/dev/bus/usb") / bus / address).exists()
+
     def read(self):
         if self.dev is None:
             self.guard = (STATE/"device.lock").open("a")
@@ -60,6 +68,8 @@ class Sensors:
                 device = names[0]
             self.dev = self.sane.open(device)
             self.device_name = device
+        if not self.usb_present():
+            raise ConnectionError("Scanner disconnected from USB.")
         # The SANE scan option shares its name with the Python scan() method.
         pressed = self.dev.dev.get_option(self.dev.opt["scan"].index)
         return bool(pressed), bool(self.dev.page_loaded)
@@ -83,7 +93,7 @@ class Controller:
             raise ValueError("Invalid saved selection.")
         self.phase = "ready"
         self.loaded = None
-        self.hardware_error = None
+        self.hardware_error = "Checking scanner connection."
         self.armed = False
         self.proc = None
         self.last = None
@@ -98,7 +108,7 @@ class Controller:
         if self.last and self.last.get("event") == "error":
             last = self.last
         return dict(mode=self.mode, status=phase, loaded=self.loaded, jobs=jobs, delivery_counts=self.queue.delivery_counts(), deliveries=self.queue.delivery_status(),
-                    sensor_error=self.hardware_error, progress=self.progress, last=last)
+                    sensor_error=self.hardware_error if self.sensors.usb_present() else "Scanner disconnected from USB.", progress=self.progress, last=last)
 
     async def sample(self):
         try:
@@ -106,7 +116,7 @@ class Controller:
             self.hardware_error = None
             return pressed
         except Exception as exc:
-            self.hardware_error = str(exc)
+            self.hardware_error = str(exc) or type(exc).__name__
             self.loaded = None
             self.armed = False
             self.sensors.close()
