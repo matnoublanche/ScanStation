@@ -18,6 +18,7 @@ From a checkout, run `sh install.sh`. The installer installs Debian packages, up
 ```sh
 scanstation batch
 scanstation sheet
+scanstation page
 scanstation multipass
 scanstation batch --profile receipt
 scanstation batch --no-filter --quality 85
@@ -25,7 +26,7 @@ scanstation batch --profile receipt --replay /path/to/original-pass
 scanstation multipass --replay /path/to/first-pass --replay /path/to/next-pass
 ```
 
-**Batch** combines retained sides into one PDF. **Sheet** creates a PDF for each physical sheet with at least one retained side. **Multipass** joins successive feeder loads. In an interactive shell, press Enter to add a load or type `f` to finish.
+**Batch** combines retained sides into one PDF. **Page** produces a separately named single-page PDF for every retained side, including a printed back. **Sheet** creates a PDF for each physical sheet with at least one retained side. **Multipass** joins successive feeder loads. In an interactive shell, press Enter to add a load or type `f` to finish.
 
 Each job has its own directory. Original PNM images are kept for every side, even those excluded from the PDF. Replay accepts consecutive `page-N.pnm` files beginning at 1, with an even number of sides. `pages.json` records per-side decisions. Final PDFs appear together in `pdf/` when assembly finishes. An entirely blank batch produces an empty PDF list.
 
@@ -42,7 +43,7 @@ scanstation next
 scanstation finish
 ```
 
-A touchscreen can call `select MODE --start-if-loaded` with `sheet`, `batch`, `multipass` or `receipt`. An empty feeder saves the choice for later. With paper loaded, the command starts the job immediately. Plain `select MODE` only saves the choice. Pressing the hardware button or running `start` uses the saved mode. The initial selection is batch. During a multipass wait, reload the feeder and press the button or use `next`. Use `finish` to assemble the PDF. The service ignores a second start while busy. Press and release the scanner button; epjitsu refreshes sensor status roughly once per second.
+A touchscreen can call `select MODE --start-if-loaded` with `page`, `sheet`, `batch`, `multipass` or `receipt`. An empty feeder saves the choice for later. With paper loaded, the command starts the job immediately. Plain `select MODE` only saves the choice. Pressing the hardware button or running `start` uses the saved mode. The initial selection is batch. During a multipass wait, reload the feeder and press the button or use `next`. Use `finish` to assemble the PDF. The service ignores a second start while busy. Press and release the scanner button; epjitsu refreshes sensor status roughly once per second.
 
 Controller commands return a snapshot. Poll `status --json` for progress. Its fields include `mode`, `status` (ready, scan, waiting, finalizing or busy), `loaded` (null when unavailable), `sensor_error`, `progress` and `last`. Selection survives service restarts. The last result stays in memory until the next result or restart. Direct SSH scanning is synchronous and does not change the selected mode.
 

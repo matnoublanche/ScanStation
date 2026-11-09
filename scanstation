@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 from PIL import ImageOps, Image, ImageChops, ImageFilter
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 
@@ -529,13 +529,13 @@ def run(args):
             if pass_no == 1 and args.reference and args.filter:
                 verify(args.reference, args)
         for index, p in enumerate(originals):
-            if not groups or (args.mode == "sheet" and index % 2 == 0):
+            if not groups or args.mode == "page" or (args.mode == "sheet" and index % 2 == 0):
                 groups.append([])
             if index % 2 == 0:
                 front_angle = 0
             position = dict(pass_number=pass_no, side=index+1, total_sides=len(originals),
                             document=len(groups), sheet=index//2+1, total_sheets=len(originals)//2,
-                            total_documents=None if args.mode == "sheet" else 1)
+                            total_documents=None if args.mode in ("sheet", "page") else 1)
             event(args, "progress", stage="crop", **position)
             correction = {}
             lines = None
@@ -655,7 +655,7 @@ def main():
         os.execv(sys.executable, [sys.executable, "/usr/local/lib/scanstation/controller.py", *sys.argv[1:]])
     parser = argparse.ArgumentParser(description=__doc__, epilog="Button commands: " + ", ".join(actions))
     parser.add_argument("--version", action="version", version="ScanStation " + VERSION)
-    parser.add_argument("mode", choices=["verify", "sheet", "batch", "multipass"])
+    parser.add_argument("mode", choices=["verify", "page", "sheet", "batch", "multipass"])
     parser.add_argument("--profile", choices=["document", "receipt"])
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--device", help="SANE device name, or auto")

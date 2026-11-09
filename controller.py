@@ -12,7 +12,7 @@ import tomllib
 
 STATE = Path(os.environ.get("XDG_STATE_HOME") or Path.home()/".local/state") / "scanstation"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home()/".config") / "scanstation/config.toml"
-MODES = ("batch", "sheet", "multipass", "receipt")
+MODES = ("batch", "page", "sheet", "multipass", "receipt")
 COMMANDS = ("select", "start", "status", "next", "finish")
 ENGINE = "/usr/local/bin/scanstation"
 
