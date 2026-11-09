@@ -6,7 +6,8 @@ trap 'rm -rf "$tmp"' EXIT
 trap 'exit 1' HUP INT TERM
 if [ "$#" -eq 2 ]; then
     base="https://raw.githubusercontent.com/$1/$2"
-    for file in scanstation controller.py jobqueue.py delivery.py config.example.toml; do
+    mkdir -p "$tmp/kiosk"
+    for file in kiosk/main.c kiosk/bridge.py kiosk/CMakeLists.txt kiosk/lv_conf.h kiosk/install.sh kiosk/scanstation-kiosk.service scanstation controller.py jobqueue.py delivery.py config.example.toml; do
         curl -fsSL "$base/$file" -o "$tmp/$file"
     done
     src=$tmp
@@ -91,3 +92,9 @@ as_root systemctl enable scanstation-delivery.service scanstation-worker.service
 as_root systemctl restart scanstation-delivery.service
 as_root systemctl restart scanstation-worker.service
 as_root systemctl restart scanstation-button.service
+
+
+# Opt in on a new appliance; keep the kiosk updated on later installs.
+if [ "${SCANSTATION_KIOSK:-}" = build ] || [ "${SCANSTATION_KIOSK:-}" = 1 ] || systemctl is-enabled --quiet scanstation-kiosk.service; then
+    sh "$src/kiosk/install.sh"
+fi

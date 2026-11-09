@@ -23,7 +23,7 @@ sys.path.append("/usr/local/lib/scanstation")
 from jobqueue import Queue, STATE
 import time
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 

@@ -128,3 +128,26 @@ upload response or a restart during the POST leaves an `uncertain` entry to avoi
 silently posting twice. Inspect Paperless before issuing `scanstation retry-upload ID`.
 A failed consumption already carrying a task UUID is rechecked, never reposted
 by this command. Local originals and PDFs remain available.
+
+## SPI touchscreen kiosk (0.8)
+
+The optional LVGL 9 panel targets the 480×320 PiScreen framebuffer and ADS7846
+touch input. Four selectors choose Page, Batch, Multipass or Receipt. The
+separate **Scan** button starts the selected mode when the feeder is loaded.
+The physical scanner button uses the same selection. While waiting between
+passes, Scan next stack and Finish PDF control the open job. The bottom panel
+shows scanner availability separately from processing and Paperless delivery.
+
+From a checkout, run `SCANSTATION_KIOSK=1 sh install.sh` as the scanning account
+to build and enable the kiosk at boot. Future installs update it automatically.
+The installer pins and checks the LVGL source archive and caches the native build.
+For a supervised trial, use `SCANSTATION_KIOSK=build sh install.sh` and start
+`scanstation-kiosk.service` manually. Starting the kiosk switches to VT8 and
+stops the display manager. Enabling the appliance sets multi-user.target as the
+default; SSH remains available. To restore desktop boot, disable and stop the
+kiosk with systemctl, set the default to graphical.target and start display-manager.
+
+Optional settings in /etc/default/scanstation-kiosk: SCANSTATION_FB,
+SCANSTATION_TOUCH, SCANSTATION_SWAP (0/1), and SCANSTATION_CALIBRATION
+(minX,minY,maxX,maxY in raw units after the optional swap; reverse either
+pair for an inverted axis). Restart the kiosk after changes.

@@ -71,7 +71,7 @@ class Queue:
                      progress=json.loads(r['latest']) if r['latest'] else None) for r in rows]
 
     def delivery_status(self):
-        return [dict(r) for r in self.db.execute("""SELECT id,job,path,state,task,doc,tag_id,explicit_tag,repair,error
+        return [dict(r) for r in self.db.execute("""SELECT id,job,path,state,task,doc,tag_id,explicit_tag,repair,error,updated
             FROM deliveries WHERE state!='delivered' OR id IN
             (SELECT id FROM deliveries WHERE state='delivered' ORDER BY updated DESC LIMIT 8)
             ORDER BY id""")]
