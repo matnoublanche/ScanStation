@@ -64,11 +64,11 @@ def advance(db, row):
             update(db, row, "consuming", task=task, due=time.time()+2, attempts=0, error=None)
         elif state == "consuming":
             tasks = [t for t in rows(call("GET", "tasks/", params={"task_id":task})) if t["task_id"] == task]
-            if not tasks or tasks[0]["status"] in ("PENDING","STARTED","RETRY","RECEIVED","PROGRESS"):
+            if not tasks or tasks[0]["status"].upper() in ("PENDING","STARTED","RETRY","RECEIVED","PROGRESS"):
                 update(db, row, state, due=time.time()+4)
                 return
             item = tasks[0]
-            if item["status"] != "SUCCESS":
+            if item["status"].upper() != "SUCCESS":
                 raise ValueError("Paperless consumption ended with status " + item["status"])
             ids = item.get("related_document_ids") or [item.get("related_document")]
             if len(ids) != 1 or not ids[0]:

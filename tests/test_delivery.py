@@ -48,7 +48,9 @@ class DeliveryTests(unittest.TestCase):
         task = str(uuid.uuid4())
         req = self.step([[dict(name="inbox",id=3,is_inbox_tag=True)],task])
         self.assertNotIn("tags", req.call_args.kwargs["data"])
-        self.step([[dict(task_id=task,status="SUCCESS",related_document_ids=[42])]])
+        self.step([[dict(task_id=task,status="started",related_document_ids=[])]])
+        self.assertEqual(self.q.delivery_status()[0]["state"], "consuming")
+        self.step([[dict(task_id=task,status="success",related_document_ids=[42])]])
         self.step([dict(tags=[3])])
         self.assertEqual(self.q.delivery_status()[0]["state"], "delivered")
 
