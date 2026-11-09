@@ -35,6 +35,10 @@ if [ ! -e "$confdir/config.toml" ]; then
 fi
 as_root install -d /usr/local/bin /usr/local/lib/scanstation
 account=$(id -un)
+# Debian grants this group scanner USB access even without a desktop session.
+if ! id -nG "$account" | tr " " "\n" | grep -qx scanner; then
+    as_root usermod -aG scanner "$account"
+fi
 # Run under the scanning account, even with no active SSH session.
 cat > "$tmp/scanstation-button.service" <<EOF
 [Unit]
@@ -43,6 +47,7 @@ After=local-fs.target
 
 [Service]
 User=$account
+SupplementaryGroups=scanner
 ExecStart=/usr/bin/python3 /usr/local/lib/scanstation/controller.py service
 Restart=on-failure
 RestartSec=2
