@@ -11,7 +11,7 @@
 
 static const char *modes[] = {"page","batch","multipass","receipt"};
 static const char *titles[] = {"Page","Batch","Multipass","Receipt"};
-static const char *hints[] = {"One PDF per side","One PDF per stack","Combine stacks","Thermal paper"};
+static const char *hints[] = {"One PDF per sheet","One PDF per stack","Combine stacks","Front only"};
 enum {BG=0x10212B, CARD=0x203541, LINE=0x38515E, INK=0xF5F8F7,
       MUTED=0xAEC3C9, MINT=0x7DE5C3, ACTIVE=0x184B46};
 static lv_obj_t *tiles[4], *marks[4], *scan, *scan_label, *finish, *scanner, *task, *indicator;
@@ -72,7 +72,7 @@ static void enabled(lv_obj_t *o,int yes) {
 }
 static void build(void) {
     const char *fr_titles[]={"Page","Lot","Multipassage","Ticket"};
-    const char *fr_hints[]={"Un PDF par face","Un PDF pour la pile","Réunir plusieurs piles","Ticket de caisse"};
+    const char *fr_hints[]={"Un PDF par feuille","Un PDF pour la pile","Réunir plusieurs piles","Recto uniquement"};
     lv_obj_t *s=lv_screen_active();color(s,BG);
     label(s,14,7,"ScanStation",&fonts[3],INK);
     indicator=box(s,449,17,10,10,MUTED,5);
@@ -91,7 +91,6 @@ static void build(void) {
     finish=box(s,300,181,168,49,CARD,8);button(finish,"finish");
     lv_obj_center(label(finish,0,0,french?"Terminer le PDF":"Finish PDF",&fonts[2],INK));
     lv_obj_add_flag(finish,LV_OBJ_FLAG_HIDDEN);
-    box(s,0,242,480,1,LINE,0);
     scanner=label(s,14,244,french?"Connexion":"Connecting",&fonts[2],INK);
     task=label(s,14,274,french?"Démarrage":"Starting controller",&fonts[1],MUTED);
     counter=label(s,396,274,"",&fonts[1],MINT);

@@ -117,7 +117,7 @@ class Controller:
         self.sensors.close()
         self.loaded = None
         self.armed = False
-        mode = "batch" if self.mode == "receipt" else self.mode
+        mode = "page" if self.mode == "receipt" else self.mode
         profile = "receipt" if self.mode == "receipt" else "document"
         self.proc = await asyncio.create_subprocess_exec(
             ENGINE, mode, "--device", self.sensors.device_name, "--profile", profile, "--json", "--enqueue", stdin=asyncio.subprocess.PIPE,

@@ -46,7 +46,9 @@ def view(state, now, lang="en"):
         scanner = tr("scan")
         if progress.get("stage") == "captured":
             side = progress.get("captured", progress["side"])
-            scanner = tr("sheet", n=(side+1)//2, side=tr("front" if side%2 else "back"))
+            simplex = progress.get("front_only", False)
+            scanner = tr("sheet", n=side if simplex else (side+1)//2,
+                         side=tr("front" if simplex or side%2 else "back"))
     else:
         scanner = tr("final" if phase == "finalizing" else "busy")
 

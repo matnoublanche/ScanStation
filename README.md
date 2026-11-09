@@ -1,6 +1,6 @@
 # ScanStation
 
-Turn a Raspberry Pi 4 and a ScanSnap S1300i into a duplex scanner. Use the hardware button, an SSH command, or a local application. Choose a PDF per sheet, one per batch, or a single PDF across multiple feeder loads. The receipt profile crops narrow thermal paper and checks for mirrored print showing through on the back.
+Turn a Raspberry Pi 4 and a ScanSnap S1300i into a duplex scanner. Use the hardware button, an SSH command, or a local application. Choose a PDF per sheet, one per batch, or a single PDF across multiple feeder loads. The receipt profile crops narrow thermal paper and captures only the front.
 
 ## Install or update
 
@@ -26,11 +26,11 @@ scanstation batch --profile receipt --replay /path/to/original-pass
 scanstation multipass --replay /path/to/first-pass --replay /path/to/next-pass
 ```
 
-**Batch** combines retained sides into one PDF. **Page** produces a separately named single-page PDF for every retained side, including a printed back. **Sheet** creates a PDF for each physical sheet with at least one retained side. **Multipass** joins successive feeder loads. In an interactive shell, press Enter to add a load or type `f` to finish.
+**Batch** combines retained sides into one PDF. **Page** (also called **Sheet**) creates a PDF for each physical sheet with at least one retained side. **Multipass** joins successive feeder loads. In an interactive shell, press Enter to add a load or type `f` to finish.
 
-Each job has its own directory. Original PNM images are kept for every side, even those excluded from the PDF. Replay accepts consecutive `page-N.pnm` files beginning at 1, with an even number of sides. `pages.json` records per-side decisions. Final PDFs appear together in `pdf/` when assembly finishes. An entirely blank batch produces an empty PDF list.
+Each job has its own directory. Original PNM images are kept for every side, even those excluded from the PDF. Replay accepts consecutive `page-N.pnm` files beginning at 1, with an even number of sides for duplex captures. Front-only capture folders contain a `.front-only` marker. `pages.json` records per-side decisions. Final PDFs appear together in `pdf/` when assembly finishes. An entirely blank batch produces an empty PDF list.
 
-The document profile acquires color at 300 dpi, deskews, crops feeder edges, filters blank sides, detects orientation, cleans the background with Leptonica, chooses grayscale or color, and exports 200 dpi JPEGs with img2pdf. The receipt profile exports grayscale at 300 dpi. It compares the back with a registered mirror of the front before discarding show-through. Use `--no-filter` to retain both sides, including faint notes. The SANE driver determines the maximum receipt length. Output is local. Paperless can perform document OCR downstream.
+The document profile acquires color at 300 dpi, deskews, crops feeder edges, filters blank sides, detects orientation, cleans the background with Leptonica, chooses grayscale or color, and exports 200 dpi JPEGs with img2pdf. The receipt profile exports grayscale at 300 dpi. It captures fronts only and uses only fronts when replaying older duplex originals. Use `--no-filter` to retain blank captured pages. The SANE driver determines the maximum receipt length. Output is local. Paperless can perform document OCR downstream.
 
 ## Physical button and touchscreen API
 

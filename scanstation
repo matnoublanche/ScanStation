@@ -23,7 +23,7 @@ sys.path.append("/usr/local/lib/scanstation")
 from jobqueue import Queue, STATE
 import time
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 
@@ -130,13 +130,16 @@ def pages(directory):
                    if (m := re.fullmatch(r"page-(\d+)\.pnm", p.name)))
     if not found or [n for n, _ in found] != list(range(1, len(found) + 1)):
         raise ValueError(f"Empty batch or nonconsecutive page numbers in {directory}")
-    if len(found) % 2:
+    if len(found) % 2 and not (directory / ".front-only").exists():
         raise ValueError(f"Odd number of sides in {directory}. Check duplex capture.")
     return [p for _, p in found]
 
 
 def acquire(dest, device, args, pass_no, previous=0):
-    cmd = ["scanimage", "-d", device, "--source", "ADF Duplex", "--mode", "Color",
+    front_only = args.profile == "receipt"
+    if front_only:
+        (dest / ".front-only").touch()
+    cmd = ["scanimage", "-d", device, "--source", "ADF Front" if front_only else "ADF Duplex", "--mode", "Color",
            "--resolution", "300", "--page-height", "0", "--format=pnm", "--batch=page-%06d.pnm"]
     with subprocess.Popen(cmd, cwd=dest, stderr=subprocess.PIPE, text=True,
                           env={**os.environ, "LC_ALL": "C"}) as result:
@@ -145,7 +148,7 @@ def acquire(dest, device, args, pass_no, previous=0):
             match = re.match(r"Scanned page (\d+)\b", line)
             if match:
                 event(args, "progress", stage="captured", pass_number=pass_no,
-                      side=int(match[1]), captured=previous+int(match[1]), total_sides=None)
+                      front_only=front_only, side=int(match[1]), captured=previous+int(match[1]), total_sides=None)
         result.wait()
     # SANE_STATUS_NO_DOCS (7) is expected at the end of the feeder.
     if result.returncode not in (0, 7):
@@ -405,7 +408,7 @@ def clean_document(im, directory):
                 if len(depth) and depth[-1] < len(band)-1:
                     page.paste("white", (int(x), 0, int(x+1), int(depth[-1]+2)))
         page = page.transpose(Image.Transpose.ROTATE_90)
-    return ImageOps.expand(page, border=8, fill="white"), fraction
+    return page, fraction
 
 
 def receipt_area(im):
@@ -441,52 +444,6 @@ def receipt_area(im):
         return paper_area(im)
     top, bottom = max(0, rows[0]-4), min(rot.height, rows[-1]+5)
     return rot.crop((l, top, r, bottom)), round(degrees, 3), [int(top), int(rot.height-bottom)]
-
-
-def receipt_marks(im):
-    gray = im.convert("L")
-    small = gray.resize((max(1, gray.width//3), max(1, gray.height//3)), Image.Resampling.BOX)
-    ink = ImageChops.subtract(small.filter(ImageFilter.MaxFilter(7)), small)
-    smooth = np.asarray(ink.filter(ImageFilter.BoxBlur(1)))
-    peak = smooth[4:-4, 4:-4].max() if min(smooth.shape) > 8 else 255
-    layout = np.asarray(ink.resize((160, 640), Image.Resampling.BOX), dtype=np.float32)
-    return layout, float(np.percentile(ink, 99)), int(peak), gray.size
-
-
-def mirrored_receipt(front, back):
-    """Register the mirrored front and veto unexplained marks on the back."""
-    front_ink, strength, _, front_size = front
-    back_ink, faint, peak, back_size = back
-    if (strength < 20 or faint > strength*.65 or peak > 125 or
-            any(abs(a-b) > .05*max(a, b) for a, b in zip(front_size, back_size))):
-        return False
-    target = back_ink[10:-10:2, 6:-6:2]
-    centered = target - target.mean()
-    norm = np.sqrt((centered**2).sum())
-    if target.std() < 2:
-        return False
-    best = 0.
-    for reflected in (front_ink[:, ::-1], front_ink[::-1, :]):
-        for dy in range(-8, 9):
-            for dx in range(-4, 5):
-                view = reflected[10+dy:630+dy:2, 6+dx:154+dx:2]
-                view = view - view.mean()
-                score = (centered*view).sum() / max(1., norm*np.sqrt((view**2).sum()))
-                if score > best:
-                    best, match, shift = score, reflected, (dy, dx)
-    if best < .55:
-        return False
-    # Allow small transport distortions. Outside the overlap, there is no
-    # front-side ink that could explain a mark. Keep unmatched writing.
-    dy, dx = shift
-    padded = np.pad(match, ((8, 8), (4, 4)))
-    aligned = padded[8+dy:648+dy, 4+dx:164+dx]
-    nearby = np.asarray(Image.fromarray(aligned.astype("uint8")).filter(ImageFilter.MaxFilter(5)))
-    residual = np.maximum(back_ink - (.65*nearby + 10), 0)
-    # The outermost cells include the cut edge of the physical paper.
-    evidence = residual[2:-2, 2:-2]
-    patch_mean = np.asarray(Image.fromarray(evidence.astype("uint8")).filter(ImageFilter.BoxBlur(2)))
-    return evidence.max() < 40 and patch_mean.max() < 20
 
 
 def read_lines(image):
@@ -612,7 +569,10 @@ def capture(args):
         event(args, "pass", number=pass_no, captured=captured)
         if args.replay:
             originals = []
-            for p in pages(args.replay[pass_no - 1]):
+            source = args.replay[pass_no - 1]
+            if (source / ".front-only").exists():
+                (folder / ".front-only").touch()
+            for p in pages(source):
                 originals.append(Path(shutil.copy2(p, folder / p.name)))
         else:
             originals = acquire(folder, args.device, args, pass_no, captured)
@@ -668,13 +628,19 @@ def process(args, job):
     processed = 0
     for pass_no, folder in enumerate(folders, 1):
         originals = pages(folder)
+        simplex = (folder / ".front-only").exists()
+        if args.profile == "receipt" and not simplex:
+            originals = originals[::2]  # Fronts from an older duplex capture.
+            simplex = True
+        sides_per_sheet = 1 if simplex else 2
         for index, p in enumerate(originals):
-            if not groups or args.mode == "page" or (args.mode == "sheet" and index % 2 == 0):
+            front = index % sides_per_sheet == 0
+            if not groups or (args.mode in ("page", "sheet") and front):
                 groups.append([])
-            if index % 2 == 0:
+            if front:
                 front_angle = 0
             position = dict(processed=processed, pass_number=pass_no, side=index+1, total_sides=len(originals),
-                            document=len(groups), sheet=index//2+1, total_sheets=len(originals)//2,
+                            document=len(groups), sheet=index//sides_per_sheet+1, total_sheets=len(originals)//sides_per_sheet,
                             total_documents=None if args.mode in ("sheet", "page") else 1)
             event(args, "progress", stage="crop", **position)
             correction = {}
@@ -684,16 +650,7 @@ def process(args, job):
                 aligned, skew, cuts = receipt_area(im) if receipt else paper_area(im)
                 correction["vertical_trim_px"] = cuts
                 event(args, "progress", stage="filter", **position)
-                blank, bright, peak = inspect_page(aligned, back=index % 2 == 1)
-                if receipt:
-                    marks = receipt_marks(aligned)
-                    if index % 2 == 0:
-                        front_marks = marks
-                    elif blank and marks[2] > 40:
-                        blank = False
-                    if index % 2 and mirrored_receipt(front_marks, marks):
-                        blank = True
-                        correction["reason"] = "front-side show-through"
+                blank, bright, peak = inspect_page(aligned, back=not front)
                 if args.filter and blank and "reason" not in correction:
                     event(args, "progress", stage="check_text", **position)
                     if blank_has_text(aligned):
@@ -727,7 +684,7 @@ def process(args, job):
                         if readability(best[1]) >= max(18, readability(other[1])*1.5):
                             angle, lines = best
                             source = "header readability"
-                    if index % 2 == 0:
+                    if front:
                         front_angle = angle
                     correction.update(clockwise_rotation=angle, orientation=source, skew_degrees=skew)
                     upright = aligned.rotate(-angle, expand=True)
