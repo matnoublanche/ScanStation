@@ -96,7 +96,7 @@ def verify(directory, args):
         with Image.open(name) as im:
             paper, _, _ = paper_area(im)
             blank, bright, peak = inspect_page(paper, back=n % 2 == 0)
-            if blank and peak >= 45 and blank_has_text(paper):
+            if blank and blank_has_text(paper):
                 blank = False
         actual.append(blank)
         event(args, "reference", file=name.name, kept=not blank, bright_fraction=bright, contrast=peak)
@@ -554,7 +554,7 @@ def run(args):
                     if index % 2 and mirrored_receipt(front_marks, marks):
                         blank = True
                         correction["reason"] = "front-side show-through"
-                if args.filter and blank and "reason" not in correction and peak >= 45:
+                if args.filter and blank and "reason" not in correction:
                     event(args, "progress", stage="check_text", **position)
                     if blank_has_text(aligned):
                         blank = False
