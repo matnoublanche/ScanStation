@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 from PIL import ImageOps, Image, ImageChops, ImageFilter
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "scanstation/config.toml"
 
 
@@ -166,8 +166,72 @@ def edge_line(gray, reverse=False):
     return slope, intercept
 
 
-def straighten(im):
-    gray = im.convert("L")
+def backing_profile(rows):
+    """Track a continuous gray-to-paper boundary, including curved and partial edges."""
+    height, width = rows.shape
+    depth = min(height // 8, 380)
+    if depth < 24 or width < 128:
+        return None
+    xs = np.arange(3, width-3, 10)
+    strips = np.median(rows[:depth, xs[:, None]+np.arange(-2, 3)], axis=2)
+    baseline = np.median(strips[:5], axis=0)
+    light = strips > np.maximum(200, baseline+18)
+    sustained = light[:-3] & light[1:-2] & light[2:-1] & light[3:]
+    crosses = sustained.argmax(axis=0)
+    valid = np.zeros(len(xs), dtype=bool)
+    for i, y in enumerate(crosses):
+        if y < 5 or not 105 <= baseline[i] <= 198:
+            continue
+        band = strips[:max(1, y-4), i]
+        valid[i] = np.mean(abs(band-baseline[i]) <= 13) >= .80
+    # Require a locally smooth run; isolated ink or holes do not define an edge.
+    for i in np.flatnonzero(valid.copy()):
+        neighbors = valid[max(0, i-3):i+4]
+        values = crosses[max(0, i-3):i+4]
+        if np.count_nonzero(neighbors & (abs(values-crosses[i]) <= 7)) < 3:
+            valid[i] = False
+    if valid.sum() < max(8, len(xs)*.09):
+        return None
+    # Extend a local track across corners where the perpendicular feeder band
+    # hides the paper edge. Stop early wherever bright paper is visible.
+    grid = np.arange(width)
+    edge = np.zeros(width, dtype=int)
+    anchors = np.flatnonzero(valid)
+    for run in np.split(anchors, np.flatnonzero(np.diff(anchors) > 18)+1):
+        if len(run) < 8:
+            continue
+        x, y = xs[run], crosses[run]
+        distance = depth
+        section = grid[(grid >= x[0]-distance) & (grid <= x[-1]+distance)]
+        estimate = np.interp(section, x, y)
+        for end, neighbor in ((0, 4), (-1, -5)):
+            slope = np.clip((y[end]-y[neighbor])/(x[end]-x[neighbor]), -.12, .12)
+            beyond = section < x[0] if end == 0 else section > x[-1]
+            estimate[beyond] = y[end] + slope*(section[beyond]-x[end])
+        edge[section] = np.maximum(edge[section], np.clip(np.ceil(estimate+2), 0, depth))
+    light = rows[:depth] > 205
+    stable = light[:-3] & light[1:-2] & light[2:-1] & light[3:]
+    first_paper = np.where(stable.any(axis=0), stable.argmax(axis=0)+1, depth)
+    edge = np.minimum(edge, first_paper)
+    return edge if edge.any() else None
+
+
+def clear_backing(im, gray):
+    """Whiten only supported outside regions in the original scanner coordinates."""
+    pixels = np.array(im)
+    for rows, rgb in ((gray, pixels), (gray[::-1], pixels[::-1]),
+                            (gray.T, pixels.swapaxes(0, 1)),
+                            (gray.T[::-1], pixels.swapaxes(0, 1)[::-1])):
+        edge = backing_profile(rows)
+        if edge is None:
+            continue
+        depth = int(edge.max())
+        rgb[:depth][np.arange(depth)[:, None] < edge] = 255
+    return Image.fromarray(pixels)
+
+
+def straighten(im, analysis=None):
+    gray = analysis if analysis is not None else im.convert("L")
     left = edge_line(gray)
     right = edge_line(gray, True)
     lines = [line for line in (left, right) if line is not None]
@@ -229,7 +293,15 @@ def feeder_edge(gray):
 
 
 def paper_area(im):
-    aligned, skew = straighten(im.convert("RGB"))
+    # Estimate geometry from unmodified pixels; use white only for the output.
+    original = im.convert("RGB")
+    analysis = original.convert("L")
+    cleaned = clear_backing(original, np.asarray(analysis))
+    aligned, skew = straighten(cleaned, analysis)
+    # Trim only rows or columns that are now entirely white.
+    bounds = ImageOps.invert(aligned.convert("L")).getbbox()
+    if bounds is not None:
+        aligned = aligned.crop(bounds)
     gray = np.asarray(aligned.convert("L"))
     pixels = np.array(aligned)
     cuts = []

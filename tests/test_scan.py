@@ -24,3 +24,18 @@ class ScanTests(unittest.TestCase):
     def test_document_title_and_date(self):
         lines = [[("ACME", 97)], [("DEVIS", 95)], [("5 novembre 2026", 95)]]
         self.assertEqual(engine["document_name"](lines, False, "Scan"), "2026-11-05 - Devis - ACME")
+
+    def test_curved_feeder_edge_preserves_print_and_corner_code(self):
+        import numpy as np
+        w, h = 900, 1200
+        a = np.full((h, w, 3), 239, dtype=np.uint8)
+        edge = (36 + 14*np.sin(np.arange(h)/145)).astype(int)
+        for y, x in enumerate(edge):
+            a[y, :x] = 148
+        a[100:117, 64:81] = 20
+        a[250:265, 150:620] = 148
+        original = Image.fromarray(a)
+        clean = engine["clear_backing"](original, np.asarray(original.convert("L")))
+        self.assertEqual(clean.getpixel((12, 410)), (255,)*3)
+        self.assertEqual(clean.getpixel((70, 106)), (20,)*3)
+        self.assertEqual(clean.getpixel((200, 257)), (148,)*3)
