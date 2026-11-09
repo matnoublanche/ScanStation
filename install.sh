@@ -21,8 +21,28 @@ test -s "$src/scanstation" && test -s "$src/config.example.toml" || exit 1
 as_root() {
     if [ "$(id -u)" -eq 0 ]; then "$@"; else sudo "$@"; fi
 }
-if [ ! -r /etc/debian_version ]; then echo 'Debian 13 required.' >&2; exit 1; fi
-as_root apt-get install -y python3-requests python3 python3-numpy python3-pil python3-sane libleptonica6 sane-utils img2pdf tesseract-ocr tesseract-ocr-osd tesseract-ocr-fra tesseract-ocr-eng
+if [ "$(id -u)" -eq 0 ]; then
+    echo 'Run as the scanning user with sudo access.' >&2
+    exit 1
+fi
+. /etc/os-release
+if [ "${VERSION_ID:-}" != 13 ]; then echo 'Debian 13 (Trixie) required.' >&2; exit 1; fi
+case "${SCANSTATION_KIOSK:-1}" in
+    1|build) set -- cmake ninja-build g++ kbd fonts-dejavu-core ;;
+    0) set -- ;;
+    *) echo 'SCANSTATION_KIOSK must be 0, 1 or build.' >&2; exit 2 ;;
+esac
+as_root apt-get update
+as_root apt-get install -y ca-certificates curl libsane1 libsane-common sane-utils \
+    python3 python3-requests python3-numpy python3-pil python3-sane libleptonica6 \
+    img2pdf tesseract-ocr tesseract-ocr-osd tesseract-ocr-fra tesseract-ocr-eng "$@"
+firmware=/usr/share/sane/epjitsu/1300i_0D12.nal
+if [ ! -s "$firmware" ]; then
+    url=https://raw.githubusercontent.com/stevleibelt/scansnap-firmware/96c3a8b2a4e4f1ccc4e5827c5eb5598084fd17c8/1300i_0D12.nal
+    curl -fsSL --retry 3 "$url" -o "$tmp/firmware"
+    echo "cbea48c6cee675c2ea970944b49b805d665ee659f753a50b83c176973f507591  $tmp/firmware" | sha256sum -c -
+    as_root install -D -m 644 "$tmp/firmware" "$firmware"
+fi
 PYTHONPATH="$src" /usr/bin/python3 "$src/scanstation" --version
 confdir=${XDG_CONFIG_HOME:-"$HOME/.config"}/scanstation
 mkdir -p "$confdir"
@@ -99,7 +119,6 @@ as_root systemctl restart scanstation-worker.service
 as_root systemctl restart scanstation-button.service
 
 
-# Opt in on a new appliance; keep the kiosk updated on later installs.
-if [ "${SCANSTATION_KIOSK:-}" = build ] || [ "${SCANSTATION_KIOSK:-}" = 1 ] || systemctl is-enabled --quiet scanstation-kiosk.service; then
+if [ "${SCANSTATION_KIOSK:-1}" != 0 ]; then
     sh "$src/kiosk/install.sh"
 fi

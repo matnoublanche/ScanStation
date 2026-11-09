@@ -4,14 +4,17 @@ Turn a Raspberry Pi 4 and a ScanSnap S1300i into a duplex scanner. Use the hardw
 
 ## Install or update
 
-Use Debian 13 with Git, current APT indexes and a working SANE installation for the S1300i, including its firmware. Run as the user who will scan, with sudo access for installation. Confirm that this account can see the scanner with `scanimage -L`.
+Flash Raspberry Pi OS Lite 64-bit (Debian 13 Trixie) on the SD card. Set up a user with sudo access and networking in Raspberry Pi Imager. Boot the Pi 4 and run this line as that user on the console or over SSH:
 
 ```sh
-(set -e; d=$(mktemp -d); trap 'rm -rf "$d"' EXIT; git clone -q --depth 1 https://github.com/matnoublanche/ScanStation.git "$d"; sh "$d/install.sh")
-scanstation --version
+(set -e; if ! command -v git >/dev/null; then sudo apt-get update && sudo apt-get install -y git ca-certificates; fi; d=$(mktemp -d); trap 'rm -rf "$d"' EXIT; git clone -q --depth 1 https://github.com/matnoublanche/ScanStation.git "$d"; sh "$d/install.sh")
 ```
 
-From a checkout, run `sh install.sh`. The installer installs Debian packages, updates the command in `/usr/local/bin` and starts `scanstation-button.service` under the scanning account at boot. Local settings and previous scans survive updates. Publish changes to GitHub before running the installer on the Pi.
+The same command installs and updates the appliance. It installs SANE, the S1300i firmware, Leptonica, Tesseract with English and French data, PDF and network dependencies, and the touchscreen build tools. It builds LVGL and enables the scanner, processing, delivery and touchscreen services. Firmware is fetched from a pinned [ScanSnap firmware mirror](https://github.com/stevleibelt/scansnap-firmware) and verified by SHA-256 when missing. The PiScreen boot overlay and ADS7846 calibration are configured for the project's hardware. Reboot once after first installation.
+
+To recover your personal Paperless connection, restore the scanning user's private `~/.config/scanstation/config.toml` and `paperless.token` from backup (mode 600), or configure the server and a new token as described below. Keep a private copy off the SD card. If that config references a custom test directory or token path, restore it too. Scan jobs are stored separately in the configured output directory. Updates preserve existing settings. For a scanner without a touchscreen, export `SCANSTATION_KIOSK=0` before installation.
+
+After reboot, run `scanstation --version`, then `scanstation status --json` with the scanner connected and open. Check that the touchscreen shows the ready state and that a test sheet reaches your Paperless inbox.
 
 ## Scan from SSH
 
@@ -155,7 +158,7 @@ pair for an inverted axis). Restart the kiosk after changes.
 ### Touchscreen language and progress (0.9)
 
 Set `ui_language = "fr"` or `ui_language = "en"` in the scanning user's
-config.toml and restart `scanstation-kiosk.service`. English is the default.
+config.toml and restart `scanstation-kiosk.service`. New installations start in French.
 This setting translates the display, including touch actions, scanning stages
 and delivery messages. Commands, filenames and the JSON API retain their existing semantics.
 
